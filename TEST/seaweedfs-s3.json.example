@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "sagtrag_demo",
+      "credentials": [
+        {
+          "accessKey": "sagtrag-demo",
+          "secretKey": "change-me"
+        }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}

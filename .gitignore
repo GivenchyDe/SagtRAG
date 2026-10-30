@@ -1,0 +1,38 @@
+.env
+.env.*
+!.env.example
+TEST/**
+!TEST/init/
+!TEST/init/001-enable-pgvector.sql
+!TEST/.env.example
+!TEST/seaweedfs-s3.json.example
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 本地文档与验收材料不进入仓库
+MD/
+backend/README.md
+
+# 本地设计素材（运行时 logo 已放在 frontend/）
+img/
+
+# 本地 IDE / 系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# 本地配置备份与生成物，包含旧项目 .env，禁止提交
+output/
+
+# 包管理器与测试缓存
+.uv-cache/
+.npm-cache/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/

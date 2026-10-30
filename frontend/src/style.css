@@ -1,0 +1,147 @@
+:root {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #111827;
+  background: #f3f4f6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  /* 菜单高亮沿用 Logo 的亮蓝色。 */
+  --el-color-primary: #007bff;
+  --el-color-primary-light-3: #4da3ff;
+  --el-color-primary-light-5: #80bdff;
+  --el-color-primary-light-7: #b3d7ff;
+  --el-color-primary-light-8: #cce4ff;
+  --el-color-primary-light-9: #eaf4ff;
+  --el-color-primary-dark-2: #0062cc;
+  --el-border-radius-base: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #f3f4f6;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* 按钮默认不会继承页面字体，统一继承，避免和相邻文字字形/视觉大小不一致。 */
+button {
+  font-family: inherit;
+}
+
+/* 全站标签统一为同一视觉高度与字号，避免状态、密级、时间并排时大小不一。 */
+.el-tag,
+.el-tag.el-tag--small {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.el-tag .el-tag__content {
+  line-height: 22px;
+}
+
+/* 表格与卡片中的时间等次要信息，与标签保持相同的行高基准。 */
+.meta-time {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+/* 操作日志表格内时间与其它列保持同一字号。 */
+.audit-table .meta-time {
+  font-size: 14px;
+}
+
+/* 分页按钮统一圆角，与卡片视觉一致。 */
+.el-pagination.is-background .el-pager li,
+.el-pagination.is-background .btn-prev,
+.el-pagination.is-background .btn-next {
+  border-radius: 8px;
+}
+
+/* 弹窗与确认框底部的主/次按钮统一规格，避免各弹窗按钮大小不一。 */
+.el-dialog__footer .el-button:not(.is-link),
+.el-message-box__btns .el-button:not(.is-link) {
+  min-width: 80px;
+  height: 32px;
+  padding: 0 16px;
+  font-size: 14px;
+}
+
+/* 确认框按钮默认比对话框更贴边，补 4px 使右侧留白与编辑弹窗一致。 */
+.el-message-box__btns {
+  padding-right: 4px;
+}
+
+/* 删除类确认弹窗的正文：感叹号与第一行文字对齐，文字自然换行。 */
+.confirm-dialog-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 2px 0 6px;
+}
+
+.confirm-dialog-icon {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: #e6a23c;
+}
+
+.confirm-dialog-text {
+  margin: 0;
+  color: #4b5563;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+/* Login uses solid hex colors and native, responsive Vue form controls. */
+.auth-page { min-height: 100vh; min-height: 100svh; display: grid; place-items: center; padding: 48px 24px; background: #F3F4F6; color: #111827; font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+.auth-content { width: 100%; max-width: 432px; }
+.auth-card { padding: 40px; border: 1px solid #E5E7EB; border-radius: 16px; background: #FFFFFF; box-shadow: 0 8px 32px #11182708, 0 1px 3px #11182704; }
+.auth-heading { text-align: center; margin-bottom: 32px; }
+.auth-logo { display: block; margin: 0 auto 14px; object-fit: contain; }
+.auth-brand { margin: 0 0 12px; font-size: 28px; line-height: 1.4; font-weight: 700; letter-spacing: -0.7px; color: #111827; }
+.auth-setup-title { margin: 0 0 10px; font-size: 24px; line-height: 1.4; font-weight: 650; letter-spacing: -0.6px; }
+.auth-description { margin: 0; color: #6B7280; font-size: 14px; line-height: 1.7; }
+.auth-description strong { font-weight: 600; }
+.auth-form { display: flex; flex-direction: column; gap: 22px; }
+.auth-field { min-width: 0; }
+.auth-field label { display: block; margin: 0 0 9px; color: #374151; font-size: 13px; line-height: 1.5; font-weight: 600; }
+.auth-field input { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid #D1D5DB; border-radius: 8px; background: #FFFFFF; color: #111827; font-size: 14px; line-height: 22px; transition: border-color 140ms ease, outline-color 140ms ease; }
+.auth-field input::placeholder { color: #9CA3AF; }
+.auth-input-wrap { position: relative; }
+.auth-input-wrap input { padding-left: 42px; }
+.auth-input-wrap .auth-password { padding-right: 48px; }
+.auth-field-icon { position: absolute; top: 15px; left: 14px; width: 18px; height: 18px; pointer-events: none; }
+.auth-field input:hover { border-color: #9CA3AF; }
+.auth-field input:focus { border-color: #1E40AF; outline: 3px solid #DBEAFE; outline-offset: 1px; }
+.auth-visibility { position: absolute; top: 2px; right: 2px; display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 6px; background: #FFFFFF; cursor: pointer; }
+.auth-visibility svg { width: 18px; height: 18px; }
+.auth-visibility:hover { background: #F3F4F6; }
+.auth-submit { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 48px; margin-top: 6px; padding: 12px 16px; border: 0; border-radius: 8px; background: #1E40AF; color: #FFFFFF; font-size: 14px; line-height: 22px; font-weight: 600; cursor: pointer; transition: background-color 140ms ease; }
+.auth-submit svg { width: 18px; height: 18px; }
+.auth-submit:hover:not(:disabled) { background: #1E3A8A; }
+.auth-submit:active:not(:disabled) { background: #172554; }
+.auth-submit:disabled { opacity: 1; background: #6479B8; color: #FFFFFF; cursor: progress; }
+.auth-page button:focus-visible { outline: 3px solid #93C5FD; outline-offset: 3px; }
+.auth-field input:disabled { background: #F9FAFB; color: #6B7280; }
+.auth-error { margin: 0 0 24px; padding: 12px 14px; border: 1px solid #FECACA; border-radius: 8px; background: #FEF2F2; color: #991B1B; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.auth-footer { display: flex; justify-content: center; gap: 8px; margin: 24px 0 0; color: #6B7280; font-size: 12px; line-height: 20px; }
+@media (max-width: 480px) {
+  .auth-page { padding: 28px 20px; }
+  .auth-card { padding: 32px 24px; border-radius: 14px; }
+  .auth-heading { margin-bottom: 28px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-page *, .auth-page *::before, .auth-page *::after { transition: none; }
+}
