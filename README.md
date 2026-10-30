@@ -68,7 +68,6 @@ SagtRAG/
 └─ docker-compose.yml
 ```
 
-`MD/`、`output/`、`img/`、`TEST/` 下的本地验收材料与缓存不进入仓库；运行时用到的 logo 已放在 `frontend/src/assets/` 和 `frontend/public/`。
 
 ## 环境要求
 
