@@ -2,7 +2,7 @@
 
 import { getToken } from './token'
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://127.0.0.1:8000'
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://127.0.0.1:8000'
 
 /** 后端已知的英文错误码到中文提示的映射，避免把内部错误直接展示给管理员。 */
 const DETAIL_MESSAGES: Record<string, string> = {

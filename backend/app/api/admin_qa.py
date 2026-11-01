@@ -22,12 +22,16 @@ def content_expired(message: Message) -> bool:
 
 def summary_item(message: Message, employee_name: str) -> dict:
     expired = content_expired(message)
+    # 意图标签不含正文，过期后保留用于统计和筛选。
     return {"id": str(message.id), "employee_name": employee_name, "msg_type": message.msg_type,
             "question": None if expired else message.content[:160], "state": message.state,
             "send_state": message.send_state, "outcome": None if expired else (message.answer or {}).get("outcome"),
             "error_code": message.error_code, "received_at": message.received_at,
             "completed_at": message.completed_at, "attempt_count": message.attempt_count,
-            "send_attempt_count": message.send_attempt_count, "content_expired": expired}
+            "send_attempt_count": message.send_attempt_count, "content_expired": expired,
+            "intent": message.intent, "predicted_intent": message.predicted_intent,
+            "intent_confidence": message.intent_confidence, "intent_source": message.intent_source,
+            "route_ms": message.route_ms}
 
 
 @router.get("")
@@ -38,6 +42,7 @@ async def list_messages(
     state: Literal["received", "queued", "processing", "completed", "failed"] | None = None,
     send_state: Literal["pending", "sending", "retry", "sent", "unknown", "cancelled", "failed"] | None = None,
     msg_type: Literal["text", "voice"] | None = None,
+    intent: Literal["chitchat", "knowledge_query", "out_of_scope"] | None = None,
     q: Annotated[str | None, Query(max_length=100)] = None,
 ) -> dict:
     conditions = [Message.tenant_id == admin.tenant_id]
@@ -47,6 +52,8 @@ async def list_messages(
         conditions.append(Message.send_state == send_state)
     if msg_type:
         conditions.append(Message.msg_type == msg_type)
+    if intent:
+        conditions.append(Message.intent == intent)
     if q and q.strip():
         pattern = f"%{q.strip()}%"
         cutoff = datetime.now(timezone.utc) - timedelta(days=get_settings().rag_message_retention_days)

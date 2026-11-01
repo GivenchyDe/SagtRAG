@@ -30,6 +30,15 @@ Thumbs.db
 # 本地配置备份与生成物，包含旧项目 .env，禁止提交
 output/
 
+# 构建/部署打包产物
+sagtrag-*.tar.gz
+
+# 生产部署本地凭据
+deploy/runtime.env
+deploy/seaweedfs-s3.json
+deploy/*.pem
+deploy/*.key
+
 # 包管理器与测试缓存
 .uv-cache/
 .npm-cache/

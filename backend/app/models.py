@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -197,9 +198,14 @@ class WeComInboundMessage(Base):
         CheckConstraint("state IN ('received', 'queued', 'processing', 'completed', 'failed')", name="ck_wecom_inbound_state"),
         CheckConstraint("send_state IN ('pending','sending','retry','sent','unknown','cancelled','failed')", name="ck_wecom_send_state"),
         CheckConstraint("length(content) <= 10000", name="ck_wecom_inbound_content_size"),
+        CheckConstraint("intent IS NULL OR intent IN ('chitchat','knowledge_query','out_of_scope')", name="ck_wecom_intent"),
+        CheckConstraint("predicted_intent IS NULL OR predicted_intent IN ('chitchat','knowledge_query','out_of_scope')", name="ck_wecom_predicted_intent"),
+        CheckConstraint("intent_confidence IS NULL OR (intent_confidence >= 0 AND intent_confidence <= 1)", name="ck_wecom_intent_confidence"),
+        CheckConstraint("route_ms IS NULL OR route_ms >= 0", name="ck_wecom_route_ms"),
         Index("ix_wecom_inbound_state", "tenant_id", "state", "received_at"),
         Index("ix_wecom_rag_claim", "tenant_id", "state", "next_attempt_at", "lease_expires_at"),
         Index("ix_wecom_qa_received", "tenant_id", "received_at", "id"),
+        Index("ix_wecom_intent_received", "tenant_id", "intent", "received_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -224,6 +230,15 @@ class WeComInboundMessage(Base):
     send_state: Mapped[str] = mapped_column(String(24), nullable=False, server_default="pending")
     send_msg_id: Mapped[str | None] = mapped_column(String(128))
     error_code: Mapped[str | None] = mapped_column(String(80))
+    predicted_intent: Mapped[str | None] = mapped_column(String(24))
+    intent: Mapped[str | None] = mapped_column(String(24))
+    intent_confidence: Mapped[float | None] = mapped_column(Float)
+    intent_source: Mapped[str | None] = mapped_column(String(16))
+    intent_model: Mapped[str | None] = mapped_column(String(80))
+    intent_rule_id: Mapped[str | None] = mapped_column(String(64))
+    intent_error: Mapped[str | None] = mapped_column(String(80))
+    route_ms: Mapped[int | None] = mapped_column(Integer)
+    policy_version: Mapped[str | None] = mapped_column(String(160))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

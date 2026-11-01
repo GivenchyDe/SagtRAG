@@ -13,6 +13,7 @@ const keyword = ref('')
 const state = ref('')
 const sendState = ref('')
 const messageType = ref('')
+const intentFilter = ref('')
 const automatic = ref(true)
 const loading = ref(false)
 const error = ref('')
@@ -28,9 +29,11 @@ let pollTimer: ReturnType<typeof setInterval> | undefined
 
 const stateLabels: Record<string, string> = { received: '待处理', queued: '排队中', processing: '处理中', completed: '处理结束', failed: '失败' }
 const sendLabels: Record<string, string> = { pending: '待发送', sending: '发送中', retry: '等待重试', sent: '已送达', unknown: '结果未知', cancelled: '已取消', failed: '发送失败' }
+const intentLabels: Record<string, string> = { chitchat: '闲聊', knowledge_query: '知识库问答', out_of_scope: '超范围' }
 const outcomeLabels: Record<string, string> = {
   answered: '已回答', no_answer: '资料不足', low_relevance: '相关度不足', invalid_citation: '引用校验未通过',
   service_error: '问答服务异常', permission_changed: '权限或资料已变化', identity_revoked: '身份已失效', answer_too_long: '需缩小问题范围',
+  chitchat: '闲聊回复', out_of_scope: '超范围引导',
   voice_media_expired: '语音已过期', voice_invalid_audio: '音频格式无效', voice_no_speech: '未识别到清晰文字',
   voice_too_long: '语音超时长', voice_too_large: '语音文件过大', voice_download_error: '语音下载失败', voice_asr_error: '语音转写失败',
 }
@@ -38,11 +41,15 @@ const errorLabels: Record<string, string> = {
   ...outcomeLabels, embedding_provider_error: '向量服务异常', rerank_provider_error: '重排服务异常', generation_provider_error: '生成服务异常',
   identity_revoked: '员工身份已失效', wecom_recipient_invalid: '收件人无效', wecom_send_unknown: '企微响应丢失，需核对送达情况',
   send_interrupted_unknown: '发送中断，需核对送达情况', send_attempt_limit: '已达发送重试上限', rag_processing_error: '任务处理异常',
+  chitchat_generation_error: '闲聊生成失败', intent_timeout: '意图识别超时', intent_http_error: '意图识别服务异常',
+  intent_invalid_response: '意图识别返回无效',
 }
 const diagnosticsLabels: Record<string, string> = {
   dense_count: '向量召回数', fts_count: '全文召回数', min_relevance: '相关度阈值',
   retrieval_ms: '检索耗时（ms）', rerank_ms: '重排耗时（ms）', generation_ms: '生成耗时（ms）',
-  rag_total_ms: '问答总耗时（ms）', send_ms: '发送耗时（ms）', generation_model: '生成模型', rerank_model: '重排模型',
+  rag_total_ms: '问答总耗时（ms）', route_ms: '路由耗时（ms）', send_ms: '发送耗时（ms）',
+  generation_model: '生成模型', rerank_model: '重排模型', intent: '意图', predicted_intent: '模型预测意图',
+  intent_confidence: '意图置信度', intent_source: '意图来源', intent_rule_id: '意图规则', policy_version: '策略版本',
 }
 const diagnosticEntries = computed(() => Object.entries(detail.value?.diagnostics ?? {})
   .filter(([key, value]) => key in diagnosticsLabels && value !== null)
@@ -68,6 +75,7 @@ async function loadMessages(silent = false) {
     if (state.value) params.set('state', state.value)
     if (sendState.value) params.set('send_state', sendState.value)
     if (messageType.value) params.set('msg_type', messageType.value)
+    if (intentFilter.value) params.set('intent', intentFilter.value)
     const result = await request<QuestionPage>(`/api/v1/admin/qa-messages?${params}`)
     if (version !== requestVersion) return
     items.value = result.items
@@ -98,7 +106,7 @@ async function showDetail(id: string) {
   }
 }
 
-watch([keyword, state, sendState, messageType], () => {
+watch([keyword, state, sendState, messageType, intentFilter], () => {
   page.value = 1
   clearTimeout(filterTimer)
   filterTimer = setTimeout(() => void loadMessages(), 250)
@@ -130,6 +138,9 @@ onBeforeUnmount(() => {
         <el-select v-model="messageType" placeholder="全部类型" clearable class="filter">
           <el-option label="文字" value="text" /><el-option label="语音" value="voice" />
         </el-select>
+        <el-select v-model="intentFilter" placeholder="全部意图" clearable class="filter">
+          <el-option v-for="(label, value) in intentLabels" :key="value" :label="label" :value="value" />
+        </el-select>
         <el-select v-model="state" placeholder="全部处理状态" clearable class="filter">
           <el-option v-for="(label, value) in stateLabels" :key="value" :label="label" :value="value" />
         </el-select>
@@ -148,6 +159,7 @@ onBeforeUnmount(() => {
         <el-table-column label="时间" width="175"><template #default="{ row }"><span class="meta-time">{{ formatDateTime(row.received_at) }}</span></template></el-table-column>
         <el-table-column prop="employee_name" label="员工" width="110" />
         <el-table-column label="类型" width="75"><template #default="{ row }">{{ row.msg_type === 'voice' ? '语音' : '文字' }}</template></el-table-column>
+        <el-table-column label="意图" width="110"><template #default="{ row }">{{ row.intent ? (intentLabels[row.intent] ?? row.intent) : '未记录' }}</template></el-table-column>
         <el-table-column label="问题" min-width="250" show-overflow-tooltip><template #default="{ row }">{{ row.content_expired ? '正文已到期清除' : (row.question || '等待语音转写') }}</template></el-table-column>
         <el-table-column label="处理状态" width="110"><template #default="{ row }"><el-tag :type="row.state === 'failed' ? 'danger' : 'info'">{{ stateLabels[row.state] ?? row.state }}</el-tag></template></el-table-column>
         <el-table-column label="回答结果" width="145"><template #default="{ row }">{{ outcomeLabel(row.outcome) }}</template></el-table-column>
@@ -167,6 +179,11 @@ onBeforeUnmount(() => {
         </div>
         <div class="status-line">
           <span>问答编号：{{ detail.id.replaceAll('-', '').slice(0, 12) }}</span>
+          <span>
+            意图：{{ detail.intent ? (intentLabels[detail.intent] ?? detail.intent) : '未记录' }}
+            <template v-if="detail.intent_confidence != null">（{{ (detail.intent_confidence * 100).toFixed(0) }}%）</template>
+            <template v-if="detail.intent_source"> · {{ detail.intent_source }}</template>
+          </span>
           <span>{{ stateLabels[detail.state] }} / {{ sendLabels[detail.send_state] }}</span>
           <span>处理 {{ detail.attempt_count }} 次，发送 {{ detail.send_attempt_count }} 次</span>
         </div>

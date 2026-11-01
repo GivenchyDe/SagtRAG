@@ -1,0 +1,15 @@
+**/.env
+**/.env.*
+!**/.env.example
+**/.venv
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+frontend/dist
+TEST/**
+!TEST/init/
+!TEST/init/001-enable-pgvector.sql
+MD/**
+img/**
+output/**
+.git/**

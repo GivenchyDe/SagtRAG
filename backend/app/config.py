@@ -29,6 +29,23 @@ class Settings(BaseSettings):
     rag_context_limit: Annotated[int, Field(ge=1, le=10)] = 5
     rag_min_relevance: Annotated[float, Field(ge=0, le=1)] = 0.25
     rag_message_retention_days: Annotated[int, Field(ge=1, le=90)] = 7
+    # 意图路由与闲聊：默认关闭，部署时通过 INTENT_ROUTING_ENABLED 显式启用。
+    intent_routing_enabled: bool = False
+    intent_model: str | None = None
+    intent_base_url: AnyHttpUrl | None = None
+    intent_timeout_seconds: Annotated[float, Field(gt=0, le=10)] = 3.0
+    intent_retry: Annotated[int, Field(ge=0, le=2)] = 1
+    intent_confidence_threshold: Annotated[float, Field(ge=0, le=1)] = 0.65
+    intent_rules_version: str = "rules-v1"
+    intent_prompt_version: str = "prompt-v1"
+    chitchat_model: str | None = None
+    chitchat_base_url: AnyHttpUrl | None = None
+    chitchat_timeout_seconds: Annotated[float, Field(gt=0, le=60)] = 30.0
+    chitchat_max_tokens: Annotated[int, Field(ge=32, le=2048)] = 512
+    chitchat_max_bytes: Annotated[int, Field(ge=64, le=2000)] = 1200
+    out_of_scope_message: str = "抱歉，我只能回答企业知识库相关的问题，或进行简单交流；不能执行代码、操作系统或访问外部服务。"
+    realtime_unavailable_message: str = "当前无法获取实时信息，请以官方渠道为准。"
+    clarify_message: str = "请补充完整的问题，例如要查询的制度、流程或产品名称。"
     asr_model: str = "qwen3-asr-flash"
     asr_base_url: AnyHttpUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     voice_max_bytes: Annotated[int, Field(ge=1024, le=10_485_760)] = 2_097_152
@@ -57,6 +74,12 @@ class Settings(BaseSettings):
     max_upload_bytes: Annotated[int, Field(ge=1_048_576, le=104_857_600)] = 20_971_520
     max_document_chunks: Annotated[int, Field(ge=1, le=50_000)] = 5_000
     rabbitmq_publish_timeout_seconds: Annotated[float, Field(gt=0, le=4)] = 1.5
+
+    @property
+    def intent_policy_version(self) -> str:
+        """意图规则、提示词与开关的组合版本，用于回放和对照实验。"""
+        mode = "on" if self.intent_routing_enabled else "off"
+        return f"{self.intent_rules_version}|{self.intent_prompt_version}|mode={mode}"
 
     @field_validator("s3_bucket")
     @classmethod

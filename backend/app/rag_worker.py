@@ -12,9 +12,11 @@ from uuid import UUID, uuid4
 import aio_pika
 from sqlalchemy import Text, cast, func, or_, select, update
 
+from app.chitchat import answer_chitchat, answer_out_of_scope
 from app.config import get_settings
 from app.db import SessionFactory, set_tenant_rls_context
 from app.integrations import create_redis_client
+from app.intent_router import IntentResult, build_policy_version, detect_intent
 from app.models import AuditEvent, Chunk, Document, User, UserStatus, WeComInboundMessage
 from app.permissions import load_principal
 from app.queueing import QUEUE_NAME
@@ -106,6 +108,55 @@ def cancel(session, message: WeComInboundMessage) -> None:
     audit(session, message, "rag.cancelled")
 
 
+def _record_intent_diagnostics(diagnostics: dict, result: IntentResult) -> None:
+    diagnostics.update({
+        "intent": result.intent,
+        "predicted_intent": result.predicted_intent,
+        "intent_confidence": result.confidence,
+        "intent_source": result.source,
+        "intent_rule_id": result.rule_id,
+        "intent_model": result.model,
+        "intent_reason": result.reason,
+        "route_ms": result.elapsed_ms,
+        "intent_error": result.error,
+        "policy_version": result.policy_version,
+    })
+
+
+async def ensure_intent(message: WeComInboundMessage, diagnostics: dict) -> IntentResult:
+    """路由一次并持久化；重试时复用检查点，不重复分类。"""
+    settings = get_settings()
+    if message.intent is not None:
+        result = IntentResult(
+            predicted_intent=message.predicted_intent,
+            intent=message.intent,
+            confidence=message.intent_confidence,
+            source=message.intent_source or "checkpoint",
+            model=message.intent_model,
+            rule_id=message.intent_rule_id,
+            reason=(message.diagnostics or {}).get("intent_reason"),
+            elapsed_ms=message.route_ms or 0,
+            error=message.intent_error,
+            policy_version=message.policy_version or build_policy_version(settings),
+        )
+        _record_intent_diagnostics(diagnostics, result)
+        return result
+
+    result = await detect_intent(message.content, settings=settings)
+    message.predicted_intent = result.predicted_intent
+    message.intent = result.intent
+    message.intent_confidence = result.confidence
+    message.intent_source = result.source
+    message.intent_model = result.model
+    message.intent_rule_id = result.rule_id
+    message.intent_error = result.error
+    message.route_ms = result.elapsed_ms
+    message.policy_version = result.policy_version
+    _record_intent_diagnostics(diagnostics, result)
+    message.diagnostics = diagnostics
+    return result
+
+
 async def process_message(message_id: UUID, worker_id: str, delivery: WeComDelivery) -> None:
     """先保存生成结果，再独立发送；重试发送复用答案而不重复检索。"""
     async with SessionFactory() as session:
@@ -160,8 +211,18 @@ async def process_message(message_id: UUID, worker_id: str, delivery: WeComDeliv
             if voice_failure is not None:
                 answer = voice_failure
             else:
+                intent_result = await ensure_intent(message, diagnostics)
+                await session.commit()
+                await set_tenant_rls_context(session, tenant_id=get_settings().we_com_tenant_id)
                 async with asyncio.timeout(240):
-                    answer = await answer_question(session, principal, message.content, diagnostics=diagnostics)
+                    if intent_result.intent == "chitchat":
+                        answer = await answer_chitchat(message.content, intent_result, settings=get_settings())
+                    elif intent_result.intent == "out_of_scope":
+                        answer = answer_out_of_scope(intent_result, get_settings())
+                    else:
+                        answer = await answer_question(session, principal, message.content, diagnostics=diagnostics)
+                if intent_result.intent == "chitchat" and answer.outcome == "service_error":
+                    diagnostics["chitchat_error"] = "chitchat_generation_error"
             await session.commit()
             await set_tenant_rls_context(session, tenant_id=get_settings().we_com_tenant_id)
             message = await session.scalar(select(WeComInboundMessage).where(

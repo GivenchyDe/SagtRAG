@@ -82,11 +82,15 @@ export type AuditEvent = {
 
 export type AuditCategory = 'all' | 'login' | 'admin' | 'user' | 'document' | 'qa'
 
+export type QuestionIntent = 'chitchat' | 'knowledge_query' | 'out_of_scope'
+
 export type QuestionItem = {
   id: string; employee_name: string; msg_type: 'text' | 'voice'; question: string | null
   state: string; send_state: string; outcome: string | null; error_code: string | null
   received_at: string; completed_at: string | null; attempt_count: number; send_attempt_count: number
   content_expired: boolean
+  intent: QuestionIntent | null; predicted_intent: QuestionIntent | null
+  intent_confidence: number | null; intent_source: string | null; route_ms: number | null
 }
 
 export type QuestionPage = {
