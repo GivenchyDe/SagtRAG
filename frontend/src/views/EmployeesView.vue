@@ -31,7 +31,7 @@ const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const editingId = ref('')
 const saving = ref(false)
-const form = reactive({ display_name: '', clearance_level: 0, wecom_userid: '' })
+const form = reactive({ display_name: '', clearance_level: 0, wecom_userid: '', developer_mode: false })
 
 const bindVisible = ref(false)
 const bindTarget = ref<Employee | null>(null)
@@ -94,6 +94,7 @@ function openCreateDialog() {
   form.display_name = ''
   form.clearance_level = 0
   form.wecom_userid = ''
+  form.developer_mode = false
   dialogVisible.value = true
   void router.replace({ path: '/employees' })
 }
@@ -104,6 +105,7 @@ function openEditDialog(employee: Employee) {
   form.display_name = employee.display_name
   form.clearance_level = employee.clearance_level
   form.wecom_userid = employee.wecom_userid ?? ''
+  form.developer_mode = employee.developer_mode
   dialogVisible.value = true
 }
 
@@ -128,6 +130,7 @@ async function saveEmployee() {
       display_name: displayName,
       clearance_level: form.clearance_level,
       wecom_userid: form.wecom_userid.trim() || null,
+      developer_mode: form.developer_mode,
     }
     if (dialogMode.value === 'create') {
       await request<Employee>('/api/v1/admin/users', {
@@ -274,6 +277,13 @@ async function unbindFromDialog() {
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="开发者模式" width="120">
+          <template #default="{ row }">
+            <el-tag :type="row.developer_mode ? 'warning' : 'info'" size="small" effect="light">
+              {{ row.developer_mode ? '已开启' : '未开启' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="创建时间" width="170">
           <template #default="{ row }"><span class="meta-time">{{ formatDateTime(row.created_at) }}</span></template>
         </el-table-column>
@@ -307,6 +317,10 @@ async function unbindFromDialog() {
         <el-form-item label="企微 userid（可选）">
           <el-input v-model="form.wecom_userid" maxlength="128" placeholder="填写企业微信通讯录 userid" />
           <p class="field-hint">留空表示暂不绑定；绑定后该企微用户可进入问答服务。</p>
+        </el-form-item>
+        <el-form-item label="开发者模式">
+          <el-switch v-model="form.developer_mode" />
+          <p class="field-hint">开启后该员工会看到引用编号和资料来源；关闭时只显示正文。</p>
         </el-form-item>
       </el-form>
       <template #footer>

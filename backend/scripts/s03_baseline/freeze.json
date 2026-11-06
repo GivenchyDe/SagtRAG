@@ -1,0 +1,63 @@
+{
+  "version": "s03-v1",
+  "frozen_date": "2026-11-05",
+  "dataset": {
+    "dataset_version": "s03-v1",
+    "fixture_sha256": "fdd5a8b1f418268525f458fa2a1758f0064f709200f5cfa0302fd56a464e552f",
+    "knowledge_points": 20,
+    "paraphrases": 100,
+    "split_groups": {
+      "tune": 12,
+      "test": 8
+    },
+    "repeat_groups": [
+      "expense_deadline",
+      "expense_materials",
+      "personal_leave",
+      "meeting_booking",
+      "purchase_threshold",
+      "taxi_limit",
+      "sick_materials",
+      "annual_carry",
+      "visitor",
+      "contract_review"
+    ],
+    "repeat_runs_per_group": 5,
+    "repeated_requests": 50,
+    "boundary_cases": 32,
+    "missing_cases": 20,
+    "citation_negative_cases": 20,
+    "conversations": 10,
+    "conversation_turns": 21,
+    "synthetic_only": true
+  },
+  "budgets": {
+    "max_pipeline_requests": 220,
+    "max_http_requests": 850,
+    "per_request_seconds": 240
+  },
+  "thresholds": {
+    "knowledge_intent_recall": 0.98,
+    "chitchat_recall": 0.95,
+    "evidence_recall_at_30": 0.95,
+    "human_verified_answer_correctness": 0.9,
+    "all_five_paraphrases_correct_groups": 0.85,
+    "fixed_evidence_negatives_allowed_false_accepts": 0,
+    "fixed_acl_failures": 0,
+    "knowledge_e2e_p95_relative_reduction_target": 0.3,
+    "absolute_production_e2e_p95_target_seconds": null
+  },
+  "latency_protocol": {
+    "quantile": "linear interpolation at (n-1)*q",
+    "load": "local harness concurrency=2 by default, compare only same profile",
+    "production_e2e_absolute_target": "pending controlled production-like load baseline; no SLA claim"
+  },
+  "quality_protocol": {
+    "fact_precheck": "necessary string checks only; not final correctness",
+    "human_review": "per-answer facts, conditions, exceptions and evidence; refusals remain in denominator",
+    "split": "by knowledge point, 12 tune / 8 test; repetitions inherit parent split",
+    "missing": "must refuse without fabricated enterprise facts; service errors are not correct refusals",
+    "conversations": "record raw messages in order; baseline uses current single-turn behavior; no oracle query rewriting",
+    "baseline_exit": "results frozen and reproducible, old version need not meet future quality thresholds"
+  }
+}

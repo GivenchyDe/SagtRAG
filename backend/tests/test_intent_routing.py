@@ -52,8 +52,8 @@ def intent_result(rule_id=None, *, intent="chitchat", reason=None, source="rule"
 def mock_http(monkeypatch, handler):
     original = httpx.AsyncClient
     transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(intent_router.httpx, "AsyncClient",
-                        lambda **kwargs: original(transport=transport, **kwargs))
+    monkeypatch.setattr(intent_router.http_clients, "get_client",
+                        lambda: original(transport=transport))
 
 
 def classifier_body(content):
@@ -162,7 +162,7 @@ async def test_fixed_chitchat_does_not_call_model(monkeypatch):
     mock_http(monkeypatch, handler)
     answer = await answer_chitchat("你好", intent_result("greeting"), settings=settings())
     assert answer.outcome == "chitchat"
-    assert "企业知识库助手" in answer.text
+    assert "有什么可以帮你查的" in answer.text
 
 
 @pytest.mark.asyncio

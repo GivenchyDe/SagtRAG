@@ -11,6 +11,7 @@ from app.api.routes import router
 from app.api.wecom_callback import router as wecom_callback_router
 from app.config import get_settings
 from app.db import SessionFactory, engine
+from app.http_clients import close_client
 from app.integrations import connected_object_store, create_redis_client
 from app.queueing import InboundPublisher, IngestionPublisher
 
@@ -37,6 +38,7 @@ async def lifespan(application: FastAPI):
     finally:
         await publisher.close()
         await ingestion_publisher.close()
+        await close_client()
         await redis_client.aclose()
         await engine.dispose()
 

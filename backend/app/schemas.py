@@ -39,13 +39,15 @@ class CreateEmployeeRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     clearance_level: int = Field(default=0, ge=0, le=3)
     wecom_userid: str | None = Field(default=None, pattern=WECOM_USERID_PATTERN)
+    developer_mode: bool = False
 
 
 class UpdateEmployeeRequest(BaseModel):
-    """编辑员工姓名、密级和可选企微 userid。"""
+    """编辑员工姓名、密级、可选企微 userid 与开发者模式。"""
     display_name: str = Field(min_length=1, max_length=200)
     clearance_level: int = Field(ge=0, le=3)
     wecom_userid: str | None = Field(default=None, pattern=WECOM_USERID_PATTERN)
+    developer_mode: bool | None = None
 
 
 class WeComBindingRequest(BaseModel):

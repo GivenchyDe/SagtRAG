@@ -31,7 +31,8 @@ def configure(monkeypatch, handler):
     monkeypatch.setattr(wecom_delivery, "get_settings", lambda: settings)
     original_client = httpx.AsyncClient
     transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(wecom_delivery.httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+    monkeypatch.setattr(wecom_delivery.http_clients, "get_client",
+                        lambda: original_client(transport=transport))
 
 
 @pytest.mark.asyncio
@@ -55,6 +56,22 @@ async def test_send_payload_refreshes_expired_token_without_duplicate(monkeypatc
     assert await sender.send_text("fixture-user", "答案 [1]") == "fixture-msg"
     assert sends[-1] == {"touser":"fixture-user","msgtype":"text","agentid":1000001,
                          "text":{"content":"答案 [1]"},"enable_duplicate_check":1,"duplicate_check_interval":1800}
+
+
+@pytest.mark.asyncio
+async def test_send_can_disable_duplicate_check(monkeypatch):
+    sends = []
+
+    def handle(request):
+        if request.url.path.endswith("gettoken"):
+            return httpx.Response(200, json={"access_token": "fixture-new-token", "expires_in": 7200})
+        sends.append(json.loads(request.content))
+        return httpx.Response(200, json={"errcode": 0, "msgid": "fixture-msg"})
+
+    configure(monkeypatch, handle)
+    assert await WeComDelivery(TokenCache()).send_text("fixture-user", "答案", duplicate_check=False) == "fixture-msg"
+    assert sends[-1]["enable_duplicate_check"] == 0
+    assert "duplicate_check_interval" not in sends[-1]
 
 
 @pytest.mark.asyncio

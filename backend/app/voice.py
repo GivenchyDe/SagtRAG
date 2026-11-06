@@ -11,7 +11,9 @@ import wave
 import httpx
 import imageio_ffmpeg
 
+from app import http_clients
 from app.config import get_settings
+from app.deadline import call_timeout, check_current
 from app.wecom_delivery import DeliveryError, WeComDelivery
 
 VOICE_MESSAGES = {
@@ -35,12 +37,19 @@ class VoiceError(Exception):
 async def download_voice(delivery: WeComDelivery, media_id: str) -> bytes:
     """只使用已验证回调中的 media_id 调用企微素材接口，限制流式下载大小。"""
     settings = get_settings()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=8)) as client:
-        for attempt in range(2):
-            try:
-                token = await delivery.access_token(client)
-                async with client.stream("GET", f"{str(settings.we_com_api_base_url).rstrip('/')}/cgi-bin/media/get",
-                                         params={"access_token": token, "media_id": media_id}) as response:
+    check_current("voice_download")
+    budget = call_timeout(30.0)
+    client = http_clients.get_client()
+    for attempt in range(2):
+        try:
+            token = await delivery.access_token(client, timeout_seconds=budget)
+            stream_budget = call_timeout(30.0)
+            async with asyncio.timeout(stream_budget):
+                async with client.stream(
+                    "GET", f"{str(settings.we_com_api_base_url).rstrip('/')}/cgi-bin/media/get",
+                    params={"access_token": token, "media_id": media_id},
+                    timeout=http_clients.request_timeout(stream_budget),
+                ) as response:
                     response.raise_for_status()
                     audio = bytearray()
                     async for part in response.aiter_bytes():
@@ -60,10 +69,10 @@ async def download_voice(delivery: WeComDelivery, media_id: str) -> bytes:
                     if not audio:
                         raise VoiceError("voice_invalid_audio")
                     return bytes(audio)
-            except DeliveryError as exc:
-                raise VoiceError("voice_download_error", retryable=exc.retryable) from exc
-            except (httpx.HTTPError, ValueError) as exc:
-                raise VoiceError("voice_download_error", retryable=True) from exc
+        except DeliveryError as exc:
+            raise VoiceError("voice_download_error", retryable=exc.retryable) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise VoiceError("voice_download_error", retryable=True) from exc
     raise VoiceError("voice_download_error", retryable=True)
 
 
@@ -77,7 +86,7 @@ async def to_wav(audio: bytes) -> tuple[bytes, float]:
         **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
     )
     try:
-        output, _ = await asyncio.wait_for(process.communicate(audio), timeout=20)
+        output, _ = await asyncio.wait_for(process.communicate(audio), timeout=call_timeout(20.0))
     except (TimeoutError, asyncio.CancelledError):
         process.kill()
         await process.communicate()
@@ -101,20 +110,22 @@ async def transcribe_wav(audio: bytes) -> str:
     """通过 Data URI 提交虚构/获准语音，不公开音频 URL，不保存隐藏内容。"""
     settings = get_settings()
     data = "data:audio/wav;base64," + base64.b64encode(audio).decode("ascii")
+    check_current("voice_asr")
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=8)) as client:
-            response = await client.post(
-                f"{str(settings.asr_base_url).rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.embedding_api_key.get_secret_value()}"},
-                json={"model": settings.asr_model, "stream": False,
-                      "messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": data}}]}],
-                      "asr_options": {"enable_itn": False}},
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            if not isinstance(content, str):
-                raise ValueError("invalid ASR response")
-            transcript = content.strip()
+        client = http_clients.get_client()
+        response = await client.post(
+            f"{str(settings.asr_base_url).rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.embedding_api_key.get_secret_value()}"},
+            json={"model": settings.asr_model, "stream": False,
+                  "messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": data}}]}],
+                  "asr_options": {"enable_itn": False}},
+            timeout=http_clients.request_timeout(call_timeout(90.0)),
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError("invalid ASR response")
+        transcript = content.strip()
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
         raise VoiceError("voice_asr_error", retryable=True) from exc
     if not transcript:
@@ -125,18 +136,36 @@ async def transcribe_wav(audio: bytes) -> str:
 
 
 async def transcribe_voice(delivery: WeComDelivery, media_id: str, diagnostics: dict) -> str:
-    """音频只在当前调用的内存中存活，诊断仅保存状态、时长和耗时。"""
-    info = {"state": "downloading", "model": get_settings().asr_model}
+    """音频只在当前调用的内存中存活，诊断仅保存状态、时长和耗时。
+
+    每个实际开始的子阶段都用 finally 记录耗时；失败阶段保留自身耗时，
+    尚未执行的阶段保持缺测，不用 0 冒充。
+    """
+    info = {"state": "downloading", "model": get_settings().asr_model, "reused": False}
     diagnostics["voice"] = info
-    start = time.perf_counter()
-    audio = await download_voice(delivery, media_id)
-    info["download_ms"] = round((time.perf_counter() - start) * 1000)
-    info["audio_bytes"] = len(audio)
-    info["state"] = "transcribing"
-    wav, duration = await to_wav(audio)
-    info["duration_seconds"] = round(duration, 2)
-    start = time.perf_counter()
-    transcript = await transcribe_wav(wav)
-    info["asr_ms"] = round((time.perf_counter() - start) * 1000)
-    info["state"] = "transcribed"
-    return transcript
+    voice_started = time.perf_counter()
+    try:
+        start = time.perf_counter()
+        try:
+            audio = await download_voice(delivery, media_id)
+        finally:
+            info["download_ms"] = round((time.perf_counter() - start) * 1000)
+        info["audio_bytes"] = len(audio)
+        info["state"] = "converting"
+        start = time.perf_counter()
+        try:
+            wav, duration = await to_wav(audio)
+            info["duration_seconds"] = round(duration, 2)
+        finally:
+            info["convert_ms"] = round((time.perf_counter() - start) * 1000)
+        info["state"] = "transcribing"
+        start = time.perf_counter()
+        try:
+            transcript = await transcribe_wav(wav)
+            info["state"] = "transcribed"
+            return transcript
+        finally:
+            info["asr_ms"] = round((time.perf_counter() - start) * 1000)
+    finally:
+        # 失败时也保留已发生的语音阶段耗时；未执行到的阶段不补 0。
+        info["voice_ms"] = round((time.perf_counter() - voice_started) * 1000)

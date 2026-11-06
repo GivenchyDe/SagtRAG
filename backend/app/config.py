@@ -1,7 +1,7 @@
 import base64
 import binascii
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import AliasChoices, AnyHttpUrl, Field, SecretStr, field_validator
@@ -24,11 +24,26 @@ class Settings(BaseSettings):
     generation_model: str = "qwen3.7-plus"
     generation_base_url: AnyHttpUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     rerank_model: str = "qwen3-rerank"
+    rerank_target_model: str = "qwen3.7-text-rerank"
+    rerank_target_url: AnyHttpUrl | None = None
+    rerank_rollout_mode: Literal["legacy", "shadow", "target"] = "legacy"
+    rerank_target_min_relevance: Annotated[float, Field(ge=0, le=1)] = 0.50
+    rerank_target_threshold_calibrated: bool = False
     rerank_url: AnyHttpUrl = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
     rag_recall_limit: Annotated[int, Field(ge=1, le=100)] = 30
     rag_context_limit: Annotated[int, Field(ge=1, le=10)] = 5
+    rag_neighbor_limit: Annotated[int, Field(ge=0, le=2)] = 0
+    rag_generation_input_chars: Annotated[int, Field(ge=500, le=30000)] = 8000
+    generation_max_tokens: Annotated[int, Field(ge=512, le=4096)] = 2048
+    rag_processing_deadline_seconds: Annotated[float, Field(gt=0, le=600)] = 240.0
+    rag_fts_fallback_enabled: bool = True
     rag_min_relevance: Annotated[float, Field(ge=0, le=1)] = 0.25
     rag_message_retention_days: Annotated[int, Field(ge=1, le=90)] = 7
+    conversation_ttl_minutes: Annotated[int, Field(ge=1, le=1440)] = 60
+    rag_worker_concurrency: Annotated[int, Field(ge=1, le=32)] = 4
+    rag_progress_after_seconds: Annotated[float, Field(gt=0, le=120)] = 8.0
+    ingestion_worker_mode: Literal["combined", "rag", "ingestion"] = "combined"
+    ingestion_threads: Annotated[int, Field(ge=1, le=8)] = 1
     # 意图路由与闲聊：默认关闭，部署时通过 INTENT_ROUTING_ENABLED 显式启用。
     intent_routing_enabled: bool = False
     intent_model: str | None = None
@@ -36,8 +51,8 @@ class Settings(BaseSettings):
     intent_timeout_seconds: Annotated[float, Field(gt=0, le=10)] = 3.0
     intent_retry: Annotated[int, Field(ge=0, le=2)] = 1
     intent_confidence_threshold: Annotated[float, Field(ge=0, le=1)] = 0.65
-    intent_rules_version: str = "rules-v1"
-    intent_prompt_version: str = "prompt-v1"
+    intent_rules_version: str = "rules-v3"
+    intent_prompt_version: str = "prompt-v2"
     chitchat_model: str | None = None
     chitchat_base_url: AnyHttpUrl | None = None
     chitchat_timeout_seconds: Annotated[float, Field(gt=0, le=60)] = 30.0

@@ -88,6 +88,7 @@ def _serialize_employee(user: User) -> dict[str, object]:
         "clearance_level": user.clearance_level,
         "status": user.status.value,
         "is_bound": user.wecom_userid is not None,
+        "developer_mode": user.developer_mode,
         "created_at": user.created_at,
     }
 
@@ -143,6 +144,7 @@ async def create_employee(
         display_name=body.display_name,
         clearance_level=body.clearance_level,
         wecom_userid=body.wecom_userid or None,
+        developer_mode=body.developer_mode,
         status=UserStatus.ACTIVE,
     )
     try:
@@ -153,7 +155,8 @@ async def create_employee(
                 tenant_id=admin.tenant_id,
                 admin_user_id=admin.id,
                 action="user.created",
-                details={"user_id": str(user.id), "display_name": user.display_name, "clearance_level": body.clearance_level},
+                details={"user_id": str(user.id), "display_name": user.display_name,
+                         "clearance_level": body.clearance_level, "developer_mode": body.developer_mode},
             )
         )
         await session.commit()
@@ -184,6 +187,8 @@ async def update_employee(
     user.clearance_level = body.clearance_level
     if body.wecom_userid is not None:
         user.wecom_userid = body.wecom_userid or None
+    if body.developer_mode is not None:
+        user.developer_mode = body.developer_mode
     if changed_clearance or changed_binding:
         user.permission_version += 1
     session.add(
@@ -196,6 +201,7 @@ async def update_employee(
                 "display_name": user.display_name,
                 "clearance_level": body.clearance_level,
                 "binding_changed": changed_binding,
+                "developer_mode": user.developer_mode,
             },
         )
     )

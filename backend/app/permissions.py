@@ -21,6 +21,7 @@ class Principal:
     clearance_level: int
     permission_version: int
     tenant_role: TenantRole | None
+    developer_mode: bool = False
 
 
 async def load_principal(session: AsyncSession, user: User) -> Principal:
@@ -31,6 +32,7 @@ async def load_principal(session: AsyncSession, user: User) -> Principal:
         clearance_level=user.clearance_level,
         permission_version=user.permission_version,
         tenant_role=user.tenant_role,
+        developer_mode=user.developer_mode,
     )
 
 

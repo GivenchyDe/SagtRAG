@@ -3,6 +3,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -107,6 +108,7 @@ class User(Base):
         server_default=UserStatus.ACTIVE.value,
     )
     permission_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    developer_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -197,6 +199,7 @@ class WeComInboundMessage(Base):
         CheckConstraint("msg_type IN ('text', 'voice')", name="ck_wecom_inbound_msg_type"),
         CheckConstraint("state IN ('received', 'queued', 'processing', 'completed', 'failed')", name="ck_wecom_inbound_state"),
         CheckConstraint("send_state IN ('pending','sending','retry','sent','unknown','cancelled','failed')", name="ck_wecom_send_state"),
+        CheckConstraint("progress_state IN ('none','sending','sent','failed','unknown')", name="ck_wecom_progress_state"),
         CheckConstraint("length(content) <= 10000", name="ck_wecom_inbound_content_size"),
         CheckConstraint("intent IS NULL OR intent IN ('chitchat','knowledge_query','out_of_scope')", name="ck_wecom_intent"),
         CheckConstraint("predicted_intent IS NULL OR predicted_intent IN ('chitchat','knowledge_query','out_of_scope')", name="ck_wecom_predicted_intent"),
@@ -218,6 +221,8 @@ class WeComInboundMessage(Base):
     media_id: Mapped[str | None] = mapped_column(String(256))
     state: Mapped[str] = mapped_column(String(24), nullable=False, server_default="received")
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    first_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     send_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -229,6 +234,11 @@ class WeComInboundMessage(Base):
     permission_version: Mapped[int | None] = mapped_column(Integer)
     send_state: Mapped[str] = mapped_column(String(24), nullable=False, server_default="pending")
     send_msg_id: Mapped[str | None] = mapped_column(String(128))
+    progress_state: Mapped[str] = mapped_column(String(24), nullable=False, server_default="none")
+    progress_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    progress_msg_id: Mapped[str | None] = mapped_column(String(128))
+    progress_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    progress_error: Mapped[str | None] = mapped_column(String(80))
     error_code: Mapped[str | None] = mapped_column(String(80))
     predicted_intent: Mapped[str | None] = mapped_column(String(24))
     intent: Mapped[str | None] = mapped_column(String(24))
@@ -240,6 +250,37 @@ class WeComInboundMessage(Base):
     route_ms: Mapped[int | None] = mapped_column(Integer)
     policy_version: Mapped[str | None] = mapped_column(String(160))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ConversationState(Base):
+    """租户/员工/会话隔离的有限状态；不保存 AI 回答或文档正文。"""
+    __tablename__ = "conversation_states"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "user_id"], ["users.tenant_id", "users.id"],
+                             name="fk_conversation_state_tenant_user"),
+        UniqueConstraint("tenant_id", "user_id", "conversation_key",
+                         name="uq_conversation_state_scope"),
+        CheckConstraint("version >= 1", name="ck_conversation_state_version"),
+        Index("ix_conversation_state_updated", "tenant_id", "user_id", "updated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    conversation_key: Mapped[str] = mapped_column(String(64), nullable=False, default="wecom:direct")
+    topic: Mapped[str | None] = mapped_column(String(200))
+    confirmed_info: Mapped[dict[str, object]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'::json"))
+    pending_fields: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'::json"))
+    pending_prompt: Mapped[str | None] = mapped_column(String(500))
+    last_query: Mapped[str | None] = mapped_column(Text)
+    last_message_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AuditEvent(Base):

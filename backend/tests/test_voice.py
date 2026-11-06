@@ -37,14 +37,15 @@ async def test_real_codec_decodes_wav_and_wecom_amr_and_enforces_duration(monkey
 
 class FakeDelivery:
     redis = None
-    async def access_token(self, client):
+    async def access_token(self, client, **_kwargs):
         return "fixture-token"
 
 
 def mocked_client(monkeypatch, handle):
     original = httpx.AsyncClient
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(voice.httpx, "AsyncClient", lambda **kwargs: original(transport=transport, **kwargs))
+    monkeypatch.setattr(voice.http_clients, "get_client",
+                        lambda: original(transport=transport))
 
 
 @pytest.mark.asyncio

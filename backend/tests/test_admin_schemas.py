@@ -44,11 +44,14 @@ def test_update_admin_only_accepts_known_status() -> None:
 
 
 def test_employee_requests_validate_clearance_and_wecom_userid() -> None:
-    """员工新增与编辑只校验姓名、密级和可选企微 userid。"""
-    created = CreateEmployeeRequest(display_name="张三", clearance_level=2, wecom_userid="zhangsan")
+    """员工新增与编辑只校验姓名、密级、可选企微 userid 与开发者模式。"""
+    created = CreateEmployeeRequest(display_name="张三", clearance_level=2, wecom_userid="zhangsan",
+                                    developer_mode=True)
     assert created.clearance_level == 2
+    assert created.developer_mode is True
     updated = UpdateEmployeeRequest(display_name="张三", clearance_level=3)
     assert updated.wecom_userid is None
+    assert updated.developer_mode is None
     with pytest.raises(ValidationError):
         UpdateEmployeeRequest(display_name="", clearance_level=0)
     with pytest.raises(ValidationError):

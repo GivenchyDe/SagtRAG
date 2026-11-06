@@ -1,11 +1,13 @@
 """数据库权威的文档摄取 Worker，支持租约回收与失败重试。"""
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import re
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -15,13 +17,31 @@ import aio_pika
 from app.config import get_settings
 from app.db import SessionFactory, engine, set_tenant_rls_context
 from app.embeddings import embed_texts
-from app.ingestion import CHUNKER_VERSION, DocumentInputError, extract_paragraphs, split_into_chunks, validate_document_bytes
+from app.http_clients import close_client
+from app.ingestion import (CHUNKER_VERSION, PARSER_VERSION, DocumentInputError,
+                            extract_structured_blocks, split_structured_chunks,
+                            validate_document_bytes)
 from app.integrations import connected_object_store
 from app.models import Document, DocumentRevision, IndexVersion, IngestionJob
 from app.queueing import INGESTION_QUEUE_NAME
 
 logger = logging.getLogger("sagtrag.ingestion")
 ACTIVE_STATES = ("validating", "parsing", "chunking", "embedding", "indexing")
+_INGESTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, get_settings().ingestion_threads),
+    thread_name_prefix="sagtrag-ingest",
+)
+
+
+async def _in_ingestion_thread(function, *args, **kwargs):
+    """把解析/分块等同步 CPU 工作移出问答事件循环，并限制线程数。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _INGESTION_EXECUTOR, functools.partial(function, *args, **kwargs))
+
+
+def shutdown_ingestion_executor() -> None:
+    _INGESTION_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 async def claim_job(worker_id: str, requested_job_id: str | None = None) -> tuple[str, str] | None:
@@ -113,10 +133,10 @@ async def process_job(job_id: str, tenant_id: str, worker_id: str) -> None:
     await _set_stage(job_id, tenant_id, worker_id, "parsing")
     async with connected_object_store(get_settings()) as store:
         content, _stored_media = await store.get(object_key)
-    validate_document_bytes(filename, media_type, content, max_bytes)
-    paragraphs = extract_paragraphs(filename, content)
+    await _in_ingestion_thread(validate_document_bytes, filename, media_type, content, max_bytes)
+    paragraphs = await _in_ingestion_thread(extract_structured_blocks, filename, content)
     await _set_stage(job_id, tenant_id, worker_id, "chunking")
-    chunks = split_into_chunks(paragraphs, revision_id=revision_id)
+    chunks = await _in_ingestion_thread(split_structured_chunks, paragraphs, revision_id=revision_id)
     if not chunks or len(chunks) > get_settings().max_document_chunks:
         raise DocumentInputError("文档分块数量超出处理限制")
     await _set_stage(job_id, tenant_id, worker_id, "embedding", {"chunk_count": len(chunks), "chunker": CHUNKER_VERSION})
@@ -145,7 +165,7 @@ async def process_job(job_id: str, tenant_id: str, worker_id: str) -> None:
             index_version = IndexVersion(
                 id=uuid4(), tenant_id=tenant_uuid, document_id=document_id, revision_id=revision_id,
                 version_number=version_number, status="building", embedding_model=get_settings().embedding_model,
-                embedding_dimension=1024, chunk_count=len(chunks), parser_version="sagtrag-parser-1",
+                embedding_dimension=1024, chunk_count=len(chunks), parser_version=PARSER_VERSION,
                 chunking_config={"version": CHUNKER_VERSION, "size": 1200, "overlap": 150},
             )
             session.add(index_version)
@@ -163,7 +183,11 @@ async def process_job(job_id: str, tenant_id: str, worker_id: str) -> None:
                     "document_id": str(document.id), "index_version_id": str(index_version.id),
                     "chunk_key": chunk["chunk_key"], "ordinal": chunk["ordinal"], "content": chunk["content"],
                     "clearance_level": clearance, "embedding": "[" + ",".join(map(str, vector)) + "]",
-                    "metadata_json": json.dumps({"revision_id": str(revision_id)}, separators=(",", ":")),
+                    "metadata_json": json.dumps({
+                        "revision_id": str(revision_id),
+                        "section_path": chunk.get("section_path") or [],
+                        "block_types": chunk.get("block_types") or [],
+                    }, separators=(",", ":")),
                 })
             await session.execute(statement, values)
             index_version.status = "active"
@@ -213,6 +237,7 @@ async def run_worker() -> None:
         try:
             connection = await aio_pika.connect_robust(settings.rabbitmq_url.get_secret_value(), timeout=3)
             channel = await connection.channel()
+            await channel.set_qos(prefetch_count=1)
             queue = await channel.declare_queue(INGESTION_QUEUE_NAME, durable=True)
         except Exception:
             logger.warning("ingestion notification queue unavailable; database recovery scan remains active")
@@ -255,12 +280,19 @@ async def run_worker() -> None:
 
 
 async def _run() -> None:
-    """运行 Worker 并在退出时释放数据库连接池。"""
+    """按配置运行问答 Worker、摄取 Worker 或二者；拆分后大文件不占问答事件循环。"""
+    mode = get_settings().ingestion_worker_mode
     try:
-        from app.rag_worker import run_rag_worker
-
-        await asyncio.gather(run_worker(), run_rag_worker())
+        tasks = []
+        if mode in {"combined", "rag"}:
+            from app.rag_worker import run_rag_worker
+            tasks.append(run_rag_worker())
+        if mode in {"combined", "ingestion"}:
+            tasks.append(run_worker())
+        await asyncio.gather(*tasks)
     finally:
+        shutdown_ingestion_executor()
+        await close_client()
         await engine.dispose()
 
 

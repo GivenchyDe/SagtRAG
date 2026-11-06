@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import asyncio
 import re
 from pathlib import PurePath
 from typing import Annotated, Literal
@@ -18,7 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.admin import CurrentAdmin
 from app.config import get_settings
 from app.db import get_db, set_tenant_rls_context
-from app.ingestion import CHUNKER_VERSION, PARSER_VERSION, DocumentInputError, validate_document_bytes
+from app.ingestion import (CHUNKER_VERSION, PARSER_VERSION, DocumentInputError,
+                           extract_structured_blocks, preview_blocks,
+                           validate_document_bytes)
+from app.integrations import connected_object_store
 from app.knowledge_bases import resolve_default_knowledge_base
 from app.models import AdminAuditEvent, Document, DocumentRevision, IndexVersion, IngestionJob
 
@@ -296,6 +300,34 @@ async def upload_document(
             # PostgreSQL 保留 queued 状态，Worker 的定时扫描会继续领取任务。
             pass
     return {"document_id": str(document_id), "job_id": str(job_id), "status": "queued", "duplicate": False}
+
+
+@router.get("/documents/{document_id}/preview")
+async def preview_document(
+    document_id: UUID,
+    admin: CurrentAdmin,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict:
+    """返回解析结构预览（段落/标题/表格顺序与章节路径），不写正文日志。"""
+    document = await session.scalar(select(Document).where(
+        Document.id == document_id, Document.tenant_id == admin.tenant_id))
+    if document is None:
+        raise HTTPException(status_code=404, detail="文档不存在。")
+    revision = await session.scalar(select(DocumentRevision).where(
+        DocumentRevision.tenant_id == admin.tenant_id,
+        DocumentRevision.document_id == document_id,
+    ).order_by(DocumentRevision.revision_number.desc()).limit(1))
+    if revision is None:
+        raise HTTPException(status_code=404, detail="文档没有可预览修订。")
+    try:
+        async with connected_object_store(get_settings()) as store:
+            content, _media = await store.get(revision.object_key)
+        blocks = await asyncio.to_thread(extract_structured_blocks, revision.filename, content)
+    except DocumentInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"document_id": str(document_id), "filename": revision.filename,
+            "parser_version": PARSER_VERSION, "blocks": preview_blocks(blocks, limit=limit)}
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

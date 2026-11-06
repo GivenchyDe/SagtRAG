@@ -1,5 +1,6 @@
 """带实时员工权限的 Dense、FTS 和 RRF 候选检索。"""
 
+import time
 from dataclasses import dataclass, replace
 from uuid import UUID
 
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import set_tenant_rls_context
+from app.deadline import DeadlineExceeded
 from app.embeddings import embed_texts
 from app.models import Chunk, Document, IndexVersion, KnowledgeBase
 from app.permissions import Principal, document_access_predicate
@@ -58,31 +60,69 @@ def reciprocal_rank_fusion(rankings: list[list[Candidate]], limit: int) -> list[
 
 
 async def retrieve(session: AsyncSession, principal: Principal, question: str, *, diagnostics: dict | None = None) -> list[Candidate]:
-    """先在 SQL 内过滤权限，再取两路 Top K、执行 RRF。"""
-    vector = (await embed_texts([question]))[0]
+    """先在 SQL 内过滤权限，再取两路 Top K、执行 RRF。
+
+    子阶段耗时分别记录查询向量、Dense、FTS 与融合；失败时也记录已发生的耗时，
+    缺测保持未知，不写 0。
+    """
+    stage = time.perf_counter()
+    fallback = False
+    try:
+        if diagnostics is not None:
+            diagnostics["embedding_calls"] = int(diagnostics.get("embedding_calls") or 0) + 1
+        vector = (await embed_texts([question]))[0]
+    except DeadlineExceeded:
+        raise
+    except RuntimeError as exc:
+        if not getattr(get_settings(), "rag_fts_fallback_enabled", True):
+            raise
+        fallback = True
+        if diagnostics is not None:
+            diagnostics["embedding_fallback"] = True
+            diagnostics["embedding_error"] = str(exc)[:80]
+    finally:
+        if diagnostics is not None:
+            diagnostics["embedding_ms"] = max(0, round((time.perf_counter() - stage) * 1000))
     await set_tenant_rls_context(session, tenant_id=principal.tenant_id,
                                  subject_id=principal.user_id, clearance_level=principal.clearance_level)
     limit = get_settings().rag_recall_limit
     base = visible_chunks(principal)
     distance = text("chunks.embedding <=> CAST(:query_vector AS vector)")
-    dense_rows = (await session.execute(
-        base.where(Chunk.embedding.is_not(None)).order_by(distance, Chunk.id).limit(limit),
-        {"query_vector": "[" + ",".join(map(str, vector)) + "]"},
-    )).all()
+    stage = time.perf_counter()
+    try:
+        if fallback:
+            dense_rows = []
+        else:
+            dense_rows = (await session.execute(
+                base.where(Chunk.embedding.is_not(None)).order_by(distance, Chunk.id).limit(limit),
+                {"query_vector": "[" + ",".join(map(str, vector)) + "]"},
+            )).all()
+    finally:
+        if diagnostics is not None:
+            diagnostics["dense_ms"] = max(0, round((time.perf_counter() - stage) * 1000))
     terms = func.tsvector_to_array(func.to_tsvector("simple", func.sagtrag_search_text(question)))
     tsquery = func.to_tsquery("simple", func.array_to_string(terms, " | "))
-    fts_rows = (await session.execute(
-        base.where(Chunk.search_vector.op("@@")(tsquery))
-        .order_by(func.ts_rank_cd(Chunk.search_vector, tsquery).desc(), Chunk.id).limit(limit)
-    )).all()
+    stage = time.perf_counter()
+    try:
+        fts_rows = (await session.execute(
+            base.where(Chunk.search_vector.op("@@")(tsquery))
+            .order_by(func.ts_rank_cd(Chunk.search_vector, tsquery).desc(), Chunk.id).limit(limit)
+        )).all()
+    finally:
+        if diagnostics is not None:
+            diagnostics["fts_ms"] = max(0, round((time.perf_counter() - stage) * 1000))
     if diagnostics is not None:
         diagnostics["dense_count"] = len(dense_rows)
         diagnostics["fts_count"] = len(fts_rows)
         diagnostics["dense_order"] = [str(row.id) for row in dense_rows]
         diagnostics["fts_order"] = [str(row.id) for row in fts_rows]
-    return reciprocal_rank_fusion(
+    stage = time.perf_counter()
+    fused = reciprocal_rank_fusion(
         [[Candidate(**row._mapping) for row in dense_rows], [Candidate(**row._mapping) for row in fts_rows]], limit,
     )
+    if diagnostics is not None:
+        diagnostics["rrf_ms"] = max(0, round((time.perf_counter() - stage) * 1000))
+    return fused
 
 
 async def revalidate_candidates(

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import { request } from '../api/client'
-import type { QuestionDetail, QuestionItem, QuestionPage } from '../api/types'
+import type { QuestionDetail, QuestionItem, QuestionPage, QuestionTiming } from '../api/types'
 import { formatDateTime } from '../utils/format'
 
 const items = ref<QuestionItem[]>([])
@@ -42,25 +42,108 @@ const errorLabels: Record<string, string> = {
   identity_revoked: '员工身份已失效', wecom_recipient_invalid: '收件人无效', wecom_send_unknown: '企微响应丢失，需核对送达情况',
   send_interrupted_unknown: '发送中断，需核对送达情况', send_attempt_limit: '已达发送重试上限', rag_processing_error: '任务处理异常',
   chitchat_generation_error: '闲聊生成失败', intent_timeout: '意图识别超时', intent_http_error: '意图识别服务异常',
-  intent_invalid_response: '意图识别返回无效',
+  intent_invalid_response: '意图识别返回无效', delivery_unknown: '发送结果未知',
 }
+const diagnosticLabels: Record<string, string> = {
+  answered: '回答通过校验', model_refused: '模型明确拒答', empty_claims: '模型未给出可校验结论',
+  schema_invalid: '结构或 schema 不符', field_type_invalid: '字段类型不符', chunk_id_invalid: '引用 UUID 无效',
+  source_not_whitelisted: '引用不在候选白名单', quote_too_short: '摘录过短', quote_mismatch: '摘录与原文不匹配',
+  quote_overbroad: '摘录包含未使用的额外数字事实',
+  claim_numeric_conflict: '结论与引文数字冲突', claim_unit_conflict: '结论与引文单位冲突',
+  claim_negation_conflict: '结论与引文否定冲突', claim_subject_conflict: '结论与引文主体冲突',
+  claim_subject_value_conflict: '结论把数值绑定到错误主体',
+  claim_scope_conflict: '结论与引文范围冲突', claim_condition_conflict: '结论遗漏引文条件或例外',
+  invalid_control_combination: 'refused 与 claims 组合非法', json_invalid: '模型输出不是唯一完整 JSON',
+  generation_incomplete: '模型流未完整结束', generation_budget_exhausted: '生成/修复预算已耗尽',
+  answered_partial: '局部保留独立有效结论',
+  chitchat_output_blocked: '闲聊输出含企业事实/秘密，已整段替换',
+  creation_unsupported: '新写/创作不支持', secret_request: '索要系统提示或密钥',
+  personal_status_unavailable: '个人实时状态未接入', system_action: '实际操作请求',
+  realtime_unavailable: '实时外部信息不可用',
+  conversation_clarify: '会话信息不足，已固定澄清并保存待补字段',
+  processing_deadline_exceeded: '处理期限耗尽，已停止后续外部调用',
+  answer_too_long: '答案超过发送预算', no_candidates: '没有可检索候选', below_relevance_threshold: '低于重排相关度阈值',
+  empty_question: '空问题', permission_changed: '处理期间权限或资料变化', identity_revoked: '员工身份已失效',
+  chitchat: '闲聊回复', out_of_scope: '超范围引导', processing_exception: '处理异常',
+  chitchat_generation_error: '闲聊生成失败', wecom_send_unknown: '企微响应丢失，需核对送达情况',
+  send_interrupted_unknown: '发送中断，需核对送达情况', send_attempt_limit: '已达发送重试上限',
+  delivery_unknown: '发送结果未知', rag_processing_error: '任务处理异常',
+  ...outcomeLabels,
+}
+const attemptStateLabels: Record<string, string> = {
+  processing: '处理中', completed: '已完成', failed: '失败', incomplete: '中断（已重试）',
+}
+const attemptKindLabels: Record<string, string> = { processing: '生成处理', send_retry: '复用答案重发' }
+const timingDefinitions: Array<{ key: keyof QuestionTiming; label: string; scope: string; optional?: boolean }> = [
+  { key: 'end_to_end_ms', label: '收到→终态', scope: '含排队、处理与发送；完成/失败/未知均记录到终态，不含企微投递到回调' },
+  { key: 'queue_wait_ms', label: '首次领取前等待', scope: '收到→首次领取；后续重试不重置' },
+  { key: 'processing_ms', label: '本次处理', scope: '当前/最近一次处理尝试，含语音与分类' },
+  { key: 'route_ms', label: '本次分类/路由', scope: '本次实际执行的规则或分类模型；复用检查点时为空' },
+  { key: 'historical_route_ms', label: '首次分类（历史）', scope: '仅分类被复用时保留首次耗时，不代表本次重新分类', optional: true },
+  { key: 'voice_ms', label: '语音全阶段', scope: '下载+转码+ASR；仅语音消息' },
+  { key: 'asr_ms', label: 'ASR 调用', scope: '仅语音转写请求本身' },
+  { key: 'retrieval_ms', label: '检索合计', scope: '查询向量+Dense+FTS+RRF' },
+  { key: 'embedding_ms', label: '查询向量', scope: '检索内的 Embedding 调用' },
+  { key: 'dense_ms', label: 'Dense 检索', scope: '检索内向量距离查询' },
+  { key: 'fts_ms', label: '全文检索', scope: '检索内 PostgreSQL FTS' },
+  { key: 'rrf_ms', label: 'RRF 融合', scope: '检索内候选融合' },
+  { key: 'rerank_ms', label: '重排', scope: '授权候选的重排调用' },
+  { key: 'generation_ms', label: '生成完成', scope: '生成开始→流结束；不含校验和发送' },
+  { key: 'generation_first_content_ms', label: '首个内容', scope: '生成开始→首个 content；不代表用户已经看到' },
+  { key: 'rag_total_ms', label: 'RAG 总耗时', scope: 'answer_question 内部；不含排队、ASR、分类和发送' },
+  { key: 'send_ms', label: '发送（最近一次）', scope: '企微发送接口调用；重试历史见发送尝试' },
+]
 const diagnosticsLabels: Record<string, string> = {
   dense_count: '向量召回数', fts_count: '全文召回数', min_relevance: '相关度阈值',
   retrieval_ms: '检索耗时（ms）', rerank_ms: '重排耗时（ms）', generation_ms: '生成耗时（ms）',
   rag_total_ms: '问答总耗时（ms）', route_ms: '路由耗时（ms）', send_ms: '发送耗时（ms）',
   generation_model: '生成模型', rerank_model: '重排模型', intent: '意图', predicted_intent: '模型预测意图',
   intent_confidence: '意图置信度', intent_source: '意图来源', intent_rule_id: '意图规则', policy_version: '策略版本',
+  diagnostic_code: '诊断码', processing_ms: '本次处理耗时（ms）', queue_wait_ms: '首次领取前等待（ms）',
+  end_to_end_ms: '收到至完成（ms）', embedding_ms: '查询向量耗时（ms）', dense_ms: 'Dense 耗时（ms）',
+  fts_ms: '全文检索耗时（ms）', rrf_ms: '融合耗时（ms）', generation_first_content_ms: '首个内容耗时（ms）',
+  route_reused: '分类已复用检查点', historical_route_ms: '首次分类耗时（ms）',
+  generation_calls: '生成调用次数', repair_attempted: '已触发修复', repair_succeeded: '修复后通过',
+  initial_error_code: '初次校验错误', final_error_code: '最终错误', claims_dropped: '局部删除结论数',
+  validation_state: '最终校验状态',
 }
 const diagnosticEntries = computed(() => Object.entries(detail.value?.diagnostics ?? {})
   .filter(([key, value]) => key in diagnosticsLabels && value !== null)
   .map(([key, value]) => ({ label: diagnosticsLabels[key], value: String(value) })))
-const voiceStateLabels: Record<string, string> = { downloading: '下载中', transcribing: '转写中', transcribed: '转写完成', failed: '转写失败' }
+const timingEntries = computed(() => timingDefinitions
+  .filter((item) => !item.optional || detail.value?.timing?.[item.key] != null)
+  .map((item) => ({ ...item, value: formatMs(detail.value?.timing?.[item.key]) })))
+const policyEntries = computed(() => {
+  const policy = detail.value?.policy
+  if (!policy) return []
+  const entries: Array<{ label: string; value: string }> = []
+  if (policy.policy_version) entries.push({ label: '策略版本', value: policy.policy_version })
+  if (policy.config_sha256) entries.push({ label: '配置摘要指纹', value: policy.config_sha256.slice(0, 16) })
+  for (const [key, value] of Object.entries(policy.config ?? {})) {
+    entries.push({ label: key, value: String(value) })
+  }
+  const whitelist = policy.source_whitelist
+  if (whitelist) {
+    const parts = Object.entries(whitelist).map(([key, value]) => `${key}=${String(value)}`)
+    entries.push({ label: '来源白名单摘要', value: parts.join(' · ') })
+  }
+  return entries
+})
+const voiceStateLabels: Record<string, string> = { downloading: '下载中', converting: '转码中', transcribing: '转写中', transcribed: '转写完成', failed: '转写失败' }
 const cards = computed(() => [
   { label: '全部问答', value: stats.value.total }, { label: '排队中', value: stats.value.queued },
   { label: '处理中', value: stats.value.processing }, { label: '已送达', value: stats.value.sent }, { label: '失败', value: stats.value.failed },
 ])
 
 function outcomeLabel(value: string | null) { return value ? (outcomeLabels[value] ?? value) : '—' }
+function formatMs(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '未记录'
+  return `${value} ms`
+}
+function diagnosticCodeLabel(value: unknown): string {
+  if (typeof value !== 'string' || !value) return '未记录'
+  return diagnosticLabels[value] ?? value
+}
 function errorLabel(value: unknown) {
   if (typeof value !== 'string' || !value) return '—'
   return errorLabels[value] ?? (value.startsWith('wecom_') ? `企微接口异常（${value}）` : value)
@@ -86,6 +169,18 @@ async function loadMessages(silent = false) {
     if (version === requestVersion) error.value = exception instanceof Error ? exception.message : '问答记录加载失败。'
   } finally {
     if (version === requestVersion) loading.value = false
+  }
+}
+
+async function recoverUnknown() {
+  if (!detail.value) return
+  if (!window.confirm('仅确认企微会话没有收到最终答案后再恢复；系统不会自动重发。是否继续？')) return
+  try {
+    await request(`/api/v1/admin/qa-messages/${detail.value.id}/recover`, { method: 'POST' })
+    await showDetail(detail.value.id)
+    await loadMessages(true)
+  } catch (exception) {
+    detailError.value = exception instanceof Error ? exception.message : '人工恢复失败。'
   }
 }
 
@@ -163,6 +258,7 @@ onBeforeUnmount(() => {
         <el-table-column label="问题" min-width="250" show-overflow-tooltip><template #default="{ row }">{{ row.content_expired ? '正文已到期清除' : (row.question || '等待语音转写') }}</template></el-table-column>
         <el-table-column label="处理状态" width="110"><template #default="{ row }"><el-tag :type="row.state === 'failed' ? 'danger' : 'info'">{{ stateLabels[row.state] ?? row.state }}</el-tag></template></el-table-column>
         <el-table-column label="回答结果" width="145"><template #default="{ row }">{{ outcomeLabel(row.outcome) }}</template></el-table-column>
+        <el-table-column label="收到→终态" width="110"><template #default="{ row }">{{ formatMs(row.timing?.end_to_end_ms) }}</template></el-table-column>
         <el-table-column label="发送状态" width="110"><template #default="{ row }"><el-tag :type="row.send_state === 'sent' ? 'success' : row.send_state === 'unknown' ? 'warning' : 'info'">{{ sendLabels[row.send_state] ?? row.send_state }}</el-tag></template></el-table-column>
         <el-table-column label="操作" width="80" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="showDetail(row.id)">详情</el-button></template></el-table-column>
       </el-table>
@@ -188,6 +284,9 @@ onBeforeUnmount(() => {
           <span>处理 {{ detail.attempt_count }} 次，发送 {{ detail.send_attempt_count }} 次</span>
         </div>
         <el-alert v-if="detail.send_state === 'unknown'" title="发送结果未知，请先核对企微会话，避免重复发送。" type="warning" :closable="false" show-icon />
+        <el-button v-if="detail.manual_recovery_required" type="warning" plain size="small" @click="recoverUnknown">人工确认后重新排队</el-button>
+        <el-alert v-if="detail.progress_state === 'sent'" title="已发送过处理中提示；该提示不是最终答案。" type="info" :closable="false" show-icon />
+        <el-alert v-if="detail.progress_state === 'unknown'" title="处理中提示可能已发送，系统不会自动重发。" type="warning" :closable="false" show-icon />
         <el-alert v-if="detail.content_expired" title="正文已超过保留期限，仅显示任务状态。" type="info" :closable="false" />
         <template v-else>
           <h3>{{ detail.msg_type === 'voice' ? '语音转写' : '员工问题' }}</h3>
@@ -197,6 +296,39 @@ onBeforeUnmount(() => {
             <span v-if="detail.diagnostics.voice.duration_seconds">时长 {{ detail.diagnostics.voice.duration_seconds }} 秒</span>
             <span v-if="detail.diagnostics.voice.asr_ms !== undefined">转写耗时 {{ detail.diagnostics.voice.asr_ms }} ms</span>
           </div>
+          <h3>耗时（各指标统计范围不同）</h3>
+          <div class="timing-grid">
+            <div v-for="entry in timingEntries" :key="entry.key">
+              <span>{{ entry.label }}</span><strong>{{ entry.value }}</strong><small>{{ entry.scope }}</small>
+            </div>
+          </div>
+          <template v-if="detail.attempts?.length">
+            <h3>处理尝试</h3>
+            <el-table :data="detail.attempts" size="small" empty-text="没有处理尝试记录">
+              <el-table-column label="次数" width="60"><template #default="{ row }">{{ row.number ?? '—' }}</template></el-table-column>
+              <el-table-column label="类型" width="110"><template #default="{ row }">{{ attemptKindLabels[row.kind] ?? row.kind }}</template></el-table-column>
+              <el-table-column label="开始" width="165"><template #default="{ row }">{{ formatDateTime(row.started_at) }}</template></el-table-column>
+              <el-table-column label="用时" width="95"><template #default="{ row }">{{ formatMs(row.duration_ms) }}</template></el-table-column>
+              <el-table-column label="状态" width="110"><template #default="{ row }">{{ attemptStateLabels[row.state] ?? row.state }}</template></el-table-column>
+              <el-table-column label="结果/错误" min-width="150"><template #default="{ row }">{{ row.error_code || row.outcome || '—' }}</template></el-table-column>
+            </el-table>
+          </template>
+          <template v-if="detail.send_attempts?.length">
+            <h3>发送尝试</h3>
+            <el-table :data="detail.send_attempts" size="small" empty-text="没有发送尝试记录">
+              <el-table-column label="次数" width="60"><template #default="{ row }">{{ row.number ?? '—' }}</template></el-table-column>
+              <el-table-column label="开始" width="165"><template #default="{ row }">{{ formatDateTime(row.started_at) }}</template></el-table-column>
+              <el-table-column label="用时" width="95"><template #default="{ row }">{{ formatMs(row.duration_ms) }}</template></el-table-column>
+              <el-table-column label="状态" width="110"><template #default="{ row }">{{ sendLabels[row.state] ?? row.state }}</template></el-table-column>
+              <el-table-column label="错误" min-width="150"><template #default="{ row }">{{ row.error_code || '—' }}</template></el-table-column>
+            </el-table>
+          </template>
+          <template v-if="policyEntries.length">
+            <h3>运行策略与白名单摘要</h3>
+            <div class="diagnostic-grid">
+              <div v-for="entry in policyEntries" :key="entry.label"><span>{{ entry.label }}</span><strong>{{ entry.value }}</strong></div>
+            </div>
+          </template>
           <h3>回答与来源</h3>
           <p class="text-block">{{ detail.answer?.text || '尚未生成答案' }}</p>
           <div v-for="(source, index) in detail.answer?.sources ?? []" :key="source.chunk_id" class="source">
@@ -215,7 +347,7 @@ onBeforeUnmount(() => {
             <el-table-column label="采用情况" width="100"><template #default="{ row }">{{ row.cited ? '已引用' : row.selected ? '进入上下文' : '未采用' }}</template></el-table-column>
           </el-table>
         </template>
-        <p>结果：{{ outcomeLabel(detail.outcome) }} · 错误信息：{{ errorLabel(detail.error_code || detail.diagnostics.error_code || detail.diagnostics.voice?.error_code) }}</p>
+        <p>结果：{{ outcomeLabel(detail.outcome) }} · 诊断：{{ diagnosticCodeLabel(detail.diagnostic_code || detail.diagnostics.diagnostic_code) }} · 错误信息：{{ errorLabel(detail.error_code || detail.diagnostics.error_code || detail.diagnostics.voice?.error_code) }}</p>
       </div>
       <template #footer><el-button v-if="selectedId" :disabled="detailLoading" @click="showDetail(selectedId)">刷新详情</el-button><el-button type="primary" @click="detailVisible = false">关闭</el-button></template>
     </el-dialog>
@@ -247,5 +379,10 @@ h3 { font-size: 14px; margin: 8px 0 0; }
 .diagnostic-grid div { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
 .diagnostic-grid span { color: #6b7280; }
 .diagnostic-grid strong { font-weight: 500; overflow-wrap: anywhere; }
-@media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .diagnostic-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .search { width: 100%; } }
+.timing-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.timing-grid div { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #eef2f7; border-radius: 8px; font-size: 12px; }
+.timing-grid span { color: #6b7280; }
+.timing-grid strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.timing-grid small { color: #9ca3af; line-height: 1.5; }
+@media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .diagnostic-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .timing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .search { width: 100%; } }
 </style>
