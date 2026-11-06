@@ -70,7 +70,7 @@ def test_rules_do_not_misclassify_method_consultation():
 
 def test_substantive_questions_route_to_knowledge():
     for text in ("介绍一下操作系统", "介绍一下操作系统，以及进程线程。",
-                 "操作系统是什么？", "进程和线程有什么区别？"):
+                 "操作系统是什么？", "进程和线程有什么区别？", "张雯迪是谁？"):
         match = classify_by_rules(normalize(text))
         assert match is not None and match.intent == "knowledge_query", text
 
@@ -79,6 +79,12 @@ def test_rules_cover_greetings_knowledge_actions_and_guards():
     assert classify_by_rules(normalize("你好")).intent == "chitchat"
     assert classify_by_rules(normalize("谢谢，辛苦了")).intent == "chitchat"
     assert classify_by_rules(normalize("你是什么模型")).intent == "chitchat"
+    assert classify_by_rules(normalize("你是谁")).intent == "chitchat"
+    assert classify_by_rules(normalize("我都可以问你什么问题")).intent == "chitchat"
+    assert classify_by_rules(normalize("我都可以问你什么问题")).rule_id == "capability"
+    assert classify_by_rules(normalize("我都可以查询什么资料")).intent == "chitchat"
+    assert classify_by_rules(normalize("我都可以查询什么资料")).rule_id == "capability"
+    assert classify_by_rules(normalize("张雯迪是谁")).intent == "knowledge_query"
     assert classify_by_rules(normalize("你好，报销流程是什么")).intent == "knowledge_query"
     assert classify_by_rules(normalize("帮我给客户发送邮件")).intent == "out_of_scope"
     assert classify_by_rules(normalize("把数据库清空")).intent == "out_of_scope"
@@ -162,7 +168,20 @@ async def test_fixed_chitchat_does_not_call_model(monkeypatch):
     mock_http(monkeypatch, handler)
     answer = await answer_chitchat("你好", intent_result("greeting"), settings=settings())
     assert answer.outcome == "chitchat"
-    assert "有什么可以帮你查的" in answer.text
+    assert answer.text.startswith("你好，")
+    assert len(answer.text) > 3
+
+
+@pytest.mark.asyncio
+async def test_capability_uses_fixed_reply(monkeypatch):
+    def handler(request):
+        raise AssertionError("model must not be called")
+
+    mock_http(monkeypatch, handler)
+    for text in ("我都可以问你什么问题", "我都可以查询什么资料"):
+        answer = await answer_chitchat(text, intent_result("capability"), settings=settings())
+        assert answer.outcome == "chitchat"
+        assert "可以帮你查" in answer.text
 
 
 @pytest.mark.asyncio

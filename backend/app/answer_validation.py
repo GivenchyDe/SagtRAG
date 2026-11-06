@@ -156,6 +156,56 @@ def _normalize_text(text: str) -> str:
     return normalized
 
 
+_MARKDOWN_SKIP = frozenset("#|`*~>")
+
+
+def _normalize_for_match(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """去掉 Markdown 结构符/列表编号并折叠空白，保留字符到原文的区间。
+
+    只移除排版结构（标题 #、表格 |、强调与代码标记、行首列表编号），
+    数字、百分号、符号和单位原样保留。
+    """
+    chars: list[str] = []
+    spans: list[tuple[int, int]] = []
+    index = 0
+    length = len(text)
+    at_line_start = True
+    while index < length:
+        char = text[index]
+        if char == "\n":
+            at_line_start = True
+            index += 1
+            continue
+        if at_line_start:
+            cursor = index
+            while cursor < length and text[cursor] in " \t":
+                cursor += 1
+            marker = re.match(r"(?:[-*+]|\d+[.)])\s+", text[cursor:])
+            if marker:
+                index = cursor + marker.end()
+                continue
+        if char.isspace():
+            end = index
+            while end < length and text[end].isspace():
+                end += 1
+            previous = chars[-1] if chars else ""
+            following = text[end] if end < length else ""
+            if previous.isdigit() and following.isdigit():
+                chars.append(" ")
+                spans.append((index, end))
+            index = end
+            at_line_start = False
+            continue
+        if char in _MARKDOWN_SKIP:
+            index += 1
+            continue
+        chars.append(char)
+        spans.append((index, index + 1))
+        at_line_start = False
+        index += 1
+    return "".join(chars), spans
+
+
 def _number_boundary(text: str, start: int, end: int) -> bool:
     """引用不能是更长数字的一部分，例如不能用 130 中的 30 作为证据。"""
     if start < len(text) and text[start].isdigit():
@@ -200,6 +250,21 @@ def match_quote(quote: str, content: str) -> QuoteMatch | None:
         return QuoteMatch(content[index:end], True, False, _quote_context(content, index, end))
     normalized, spans = _normalize_with_spans(content)
     wanted = _normalize_text(value)
+    if not wanted:
+        return None
+    position = normalized.find(wanted)
+    while position != -1:
+        end_position = position + len(wanted)
+        start = spans[position][0]
+        end = spans[end_position - 1][1]
+        if _number_boundary(content, start, end):
+            return QuoteMatch(content[start:end], False, True,
+                              _quote_context(content, start, end))
+        position = normalized.find(wanted, position + 1)
+
+    # 兼容 Markdown 标题、表格管道符、列表编号等排版差异。
+    normalized, spans = _normalize_for_match(content)
+    wanted, _ = _normalize_for_match(value)
     if not wanted:
         return None
     position = normalized.find(wanted)
@@ -316,31 +381,56 @@ def _subject_value_bindings(
     return result
 
 
-def detect_claim_conflicts(text: str, evidence_texts: list[str]) -> list[str]:
-    """确定性检查明显冲突；返回空列表只表示未发现，不表示已证明语义支持。"""
+def detect_claim_conflicts(text: str, evidence_texts: list[str], *,
+                           full_evidence_texts: list[str] | None = None) -> list[str]:
+    """确定性检查明显冲突；返回空列表只表示未发现，不表示已证明语义支持。
+
+    full_evidence_texts 用于“引文只是短摘录、但数字在同一 chunk 其他位置”的情况：
+    数字在该 chunk 内能定位时不再报数字冲突；单位/否定/主体/条件仍按引文语境检查。
+    """
     text = unicodedata.normalize("NFKC", text)
     evidence = unicodedata.normalize("NFKC", "\n".join(evidence_texts))
+    full_evidence = unicodedata.normalize(
+        "NFKC", "\n".join(full_evidence_texts if full_evidence_texts is not None else evidence_texts))
     codes: list[str] = []
     claim_numbers = _extract_numbers(text)
     evidence_numbers = _extract_numbers(evidence)
+    full_numbers = _extract_numbers(full_evidence)
     claim_by_family: dict[str, list[tuple[Decimal, str | None]]] = {}
     evidence_by_family: dict[str, list[tuple[Decimal, str | None]]] = {}
+    full_by_family: dict[str, list[tuple[Decimal, str | None]]] = {}
     for number, family, unit in claim_numbers:
         if family:
             claim_by_family.setdefault(family, []).append((number, unit))
     for number, family, unit in evidence_numbers:
         if family:
             evidence_by_family.setdefault(family, []).append((number, unit))
+    for number, family, unit in full_numbers:
+        if family:
+            full_by_family.setdefault(family, []).append((number, unit))
     for family, claim_values in claim_by_family.items():
         evidence_values = evidence_by_family.get(family)
+        full_values = full_by_family.get(family) or []
+        full_set = {number for number, _ in full_values}
         if not evidence_values:
-            # 引文有其他数量却没有同族数量，不能为这个数量结论背书。
-            if evidence_numbers:
+            # 引文语境没有同族数量：若该数量能在同一 chunk 内定位，则不报数字冲突。
+            if evidence_numbers and not all(number in full_set for number, _ in claim_values):
                 codes.append(CONFLICT_NUMERIC)
             continue
         evidence_set = {number for number, _ in evidence_values}
-        if any(number not in evidence_set for number, _ in claim_values):
-            codes.append(CONFLICT_NUMERIC)
+        missing = [(number, unit) for number, unit in claim_values if number not in evidence_set]
+        if missing:
+            if not all(number in full_set for number, _ in missing):
+                codes.append(CONFLICT_NUMERIC)
+                continue
+            # 数字在 chunk 内其他位置可定位；检查单位是否能在该 chunk 的对应数字上找到。
+            for number, unit in missing:
+                if not unit:
+                    continue
+                full_units = {candidate_unit for candidate_number, candidate_unit in full_values
+                              if candidate_number == number and candidate_unit}
+                if full_units and unit not in full_units:
+                    codes.append(CONFLICT_UNIT)
             continue
         claim_units = {unit for _, unit in claim_values if unit}
         evidence_units = {unit for _, unit in evidence_values if unit}
@@ -397,14 +487,16 @@ _UNSAFE_REASON_RE = re.compile(
     r"\d|%|％|元|美元|人民币|必须|应当|不得|禁止|所有|任何|一律"
 )
 
+SAFE_MISSING_REASON_TEXT = "抱歉，我在现有资料里没有找到足够的依据。是不是问题里的名称或关键词有点偏差？可以补充具体的制度、流程或文档名称，我再帮你查。"
+
 
 def safe_missing_reason(reason: str) -> str:
     """拒答说明只允许简短“缺少什么”，带数字/事实断言时退回固定话术。"""
     value = (reason or "").strip()
     if not value:
-        return "当前可访问资料中没有足够依据回答这个问题，请补充资料或联系管理员。"
+        return SAFE_MISSING_REASON_TEXT
     if value.startswith("当前资料未覆盖"):
         value = value[len("当前资料未覆盖"):].lstrip("：:，, ")
     if not value or _UNSAFE_REASON_RE.search(value):
-        return "当前可访问资料中没有足够依据回答这个问题，请补充资料或联系管理员。"
+        return SAFE_MISSING_REASON_TEXT
     return f"当前资料未覆盖：{value[:80]}"

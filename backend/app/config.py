@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v4"
     generation_model: str = "qwen3.7-plus"
     generation_base_url: AnyHttpUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    generation_temperature: Annotated[float, Field(ge=0, le=2)] = 0.7
     rerank_model: str = "qwen3-rerank"
     rerank_target_model: str = "qwen3.7-text-rerank"
     rerank_target_url: AnyHttpUrl | None = None

@@ -94,7 +94,27 @@ def test_refusal_reason_is_bounded_and_fact_assertions_fall_back():
     assert safe.text == "当前资料未覆盖：缺少差旅补贴标准"
     unsafe = validate_answer({"refused": True, "claims": [],
                               "refusal_reason": "所有员工都可以报销900元"}, [item])
-    assert unsafe.text == "当前可访问资料中没有足够依据回答这个问题，请补充资料或联系管理员。"
+    assert unsafe.text == rag.NO_ANSWER
+
+
+def test_quote_matching_tolerates_markdown_table_and_list_markers():
+    content = "| 1 日以内（含 1 日） | 直属主管审批 |\n1. 员工在考勤系统提交请假申请"
+    assert answer_validation.match_quote("1 日以内（含 1 日）直属主管审批", content) is not None
+    assert answer_validation.match_quote("员工在考勤系统提交请假申请", content) is not None
+
+
+def test_numeric_conflict_allows_number_elsewhere_in_cited_chunk():
+    codes = answer_validation.detect_claim_conflicts(
+        "报销期限为30天，单笔上限为200元。", ["报销期限为30天。"],
+        full_evidence_texts=["报销期限为30天。单笔上限为200元。"])
+    assert answer_validation.CONFLICT_NUMERIC not in codes
+
+
+def test_numeric_conflict_still_rejects_number_absent_from_chunk():
+    codes = answer_validation.detect_claim_conflicts(
+        "补贴比例为15%。", ["补贴比例为1.5%。"],
+        full_evidence_texts=["补贴比例为1.5%。"])
+    assert answer_validation.CONFLICT_NUMERIC in codes
 
 
 def test_quote_formatting_is_recovered_but_numbers_are_not_merged():

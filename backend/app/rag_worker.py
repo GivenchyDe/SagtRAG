@@ -37,7 +37,7 @@ from app.voice import VoiceError, VOICE_MESSAGES, transcribe_voice
 
 logger = logging.getLogger("sagtrag.rag")
 MAX_ATTEMPTS = 3
-PROGRESS_TEXT = "正在查询授权资料，请稍候。处理完成后会发送最终答复。"
+PROGRESS_TEXT = "收到，正在帮你查资料，请稍等一下。"
 
 
 async def maybe_send_progress(

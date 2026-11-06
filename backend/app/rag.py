@@ -21,11 +21,11 @@ from app.models import Chunk
 from app.permissions import Principal
 from app.retrieval import Candidate, revalidate_candidates, retrieve
 
-NO_ANSWER = "当前可访问资料中没有足够依据回答这个问题，请补充资料或联系管理员。"
+NO_ANSWER = answer_validation.SAFE_MISSING_REASON_TEXT
 SERVICE_ERROR = "问答服务暂时不可用，请稍后重试。"
 PERMISSION_CHANGED = "处理期间权限或资料发生变化，请重新提问。"
-NO_CANDIDATES_TEXT = "当前可访问资料中没有找到与这个问题直接相关的内容。可以补充制度名称、适用范围，或换一种问法。"
-LOW_RELEVANCE_TEXT = "检索到的资料与问题相关度不足，暂时无法据此回答。可以补充更具体的关键词或缩小问题范围。"
+NO_CANDIDATES_TEXT = "抱歉，我在现有资料里没有找到和这个问题直接相关的内容。是不是名称或关键词有点偏差？可以补充具体的制度、流程或文档名称，我再帮你查。"
+LOW_RELEVANCE_TEXT = "抱歉，我暂时没找到和这个问题特别匹配的内容。是不是关键词有点偏差，或者问法不太一样？你可以补充具体的制度、流程名称，或者换个说法，我再帮你查。"
 DEVELOPER_FOOTER_RESERVE = len("\n问答编号：".encode("utf-8")) + 12
 SEND_BUDGET_BYTES = 2000
 
@@ -103,6 +103,8 @@ SYSTEM_PROMPT = """你是企业知识库助手，服务于公司内部员工。�
 5. 引用必须来自资料原文；引文真实不代表结论正确，结论必须能被引文支持。
 6. 不执行任何操作请求（发送、删除、修改、审批、付款）；只做解释和指引。
 7. 实时信息（天气、股价、新闻等）不编造具体数值，按固定话术说明无法获取。
+8. 如果资料明确描述了某个人物/角色（包括虚构、娱乐或内部设定），可以回答“资料显示……”；不要要求官方身份证明，也不要把虚构设定当作真实身份确认。
+9. 只要资料提到了该人物或术语，就先回答资料中的设定，再说明资料未覆盖的部分；只有资料完全未提及该人物时才整体拒答。
 
 【回答结构】
 1. 第一句直接回答“是什么/能不能/要做什么”，不要先问候、复述问题或说“根据资料”；先给结论，再补充条件。
@@ -111,6 +113,7 @@ SYSTEM_PROMPT = """你是企业知识库助手，服务于公司内部员工。�
 4. 信息确实并列时用短分点；否则用自然段落，每段 2–4 句。
 5. 结尾给下一步建议即可；不要机械追问，不要提出系统当前无法承接的追问。当前单轮优先把已知信息讲完整。
 6. 回答长度与问题匹配：简单问题 3–5 句，流程类问题可分段，不堆砌制度全文。
+7. 涉及资料中的人物/角色时，用“资料显示……”开头或明确说明这是资料中的描述。
 
 【语言风格】
 1. 自然、专业、口语化的书面语；像同事解释制度，不像播报条款。
@@ -131,6 +134,7 @@ SYSTEM_PROMPT = """你是企业知识库助手，服务于公司内部员工。�
 最多 4 条 claims；每条 claim 是一个自然段，不是一句一条；段落之间要有承接，第一段先直接回答。
 每条 claim 控制在 150 字以内；整个回答尽量控制在 500 字以内。
 每条 claim 至少一条引用，引用不可伪造；quote 必须从对应 chunk 正文逐字复制，不要改写、不要拼接、不要只写摘要；每条 claim 用 1–3 条短引文。
+每条 claim 只写其引文能直接支持的结论；如果结论包含来自不同句子的多个数字/条件，拆成多条 claim，每条单独引用同一段连续原文。表格内容请整行或单元格原文复制，不要改写成句子。
 资料不足、无关或互相矛盾而无法回答时：{"refused":true,"claims":[],"refusal_reason":"缺少哪些资料"}；
 refusal_reason 只写缺少的资料主题，不编造事实。
 不在 text 内生成引用编号、链接、资料 ID 或“资料来源”。"""
@@ -319,6 +323,7 @@ async def model_json(system: str, data: dict[str, object], *, diagnostics: dict 
                 "POST", f"{str(settings.generation_base_url).rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {settings.embedding_api_key.get_secret_value()}"},
                 json={"model": settings.generation_model, "stream": True,
+                      "temperature": float(getattr(settings, "generation_temperature", 0.7)),
                       "max_tokens": getattr(settings, "generation_max_tokens", 2048),
                       "messages": [{"role": "system", "content": system},
                                    {"role": "user", "content": json.dumps(data, ensure_ascii=False)}]},
@@ -527,7 +532,8 @@ def validate_answer(raw: dict, candidates: list[Candidate], *, allow_partial: bo
             failures.append((claim.text.strip(), failure[0], failure[1]))
             continue
         conflicts = answer_validation.detect_claim_conflicts(
-            claim.text, [citation.context for citation in citations])
+            claim.text, [citation.context for citation in citations],
+            full_evidence_texts=[citation.item.content for citation in citations])
         if conflicts:
             failures.append((claim.text.strip(), conflicts[0],
                              {"conflict_codes": conflicts, "claim_index": claim_index}))
@@ -556,7 +562,48 @@ def validate_answer(raw: dict, candidates: list[Candidate], *, allow_partial: bo
                             developer=developer)
 
 
-def _repair_feedback(code: str, detail: dict[str, object] | None = None) -> str:
+def _repair_hint(code: str, detail: dict[str, object] | None, raw: dict | None) -> str:
+    """把失败的具体 claim/引文反馈给模型；不包含资料正文，也不写入诊断。"""
+    failures = (detail or {}).get("failure_details") or []
+    if not isinstance(failures, list) or not failures or not isinstance(raw, dict):
+        return ""
+    first = failures[0]
+    if not isinstance(first, dict):
+        return ""
+    index = first.get("claim_index")
+    claims = raw.get("claims")
+    if not isinstance(index, int) or not isinstance(claims, list) or not 0 <= index < len(claims):
+        return ""
+    claim = claims[index]
+    if not isinstance(claim, dict):
+        return ""
+    text = str(claim.get("text") or "").strip()[:80]
+    quote = ""
+    chunk_id = ""
+    citations = claim.get("citations")
+    citation_index = first.get("citation_index")
+    if isinstance(citations, list) and isinstance(citation_index, int) and 0 <= citation_index < len(citations):
+        citation = citations[citation_index]
+        if isinstance(citation, dict):
+            quote = str(citation.get("quote") or "").strip()[:80]
+            chunk_id = str(citation.get("chunk_id") or "")
+    if code == observability.QUOTE_MISMATCH:
+        return (f"第{index + 1}条 claim「{text}」的引文「{quote}」不是 chunk {chunk_id} 的逐字连续原文。"
+                "请直接从该 chunk 正文复制一段连续原文，包含该结论的数字/条件；"
+                "不要改写、不要拼接两句、不要把表格行改写成句子。")
+    if code == observability.QUOTE_OVERBROAD:
+        return (f"第{index + 1}条 claim「{text}」的引文过长或包含结论未使用的额外数字。"
+                "请只复制与该结论直接相关的同一段连续原文，必要时拆成多条 claim。")
+    if code in {answer_validation.CONFLICT_NUMERIC, answer_validation.CONFLICT_UNIT,
+                answer_validation.CONFLICT_NEGATION, answer_validation.CONFLICT_SUBJECT,
+                answer_validation.CONFLICT_SUBJECT_VALUE,
+                answer_validation.CONFLICT_SCOPE, answer_validation.CONFLICT_CONDITION}:
+        return (f"第{index + 1}条 claim「{text}」含有引文语境未覆盖的数字/单位/主体/条件。"
+                "请拆成多条 claim，每条只写其引文能直接支持的结论；或引用包含该数字的原文。")
+    return ""
+
+
+def _repair_feedback_base(code: str) -> str:
     """只提供安全错误类别，不回传模型原始输出或资料正文。"""
     if code in JSON_ERRORS:
         return "上一次输出不是唯一完整 JSON 对象；请只输出一个符合 schema 的 JSON 对象。"
@@ -575,6 +622,13 @@ def _repair_feedback(code: str, detail: dict[str, object] | None = None) -> str:
                 observability.INVALID_CONTROL_COMBINATION}:
         return "上一次输出不符合结构约束；refused 必须是布尔值，claims 与 citations 字段类型和上限必须符合 schema。"
     return "上一次输出未通过校验；请按 schema 重新输出，不得编造引用或企业事实。"
+
+
+def _repair_feedback(code: str, detail: dict[str, object] | None = None, *,
+                     raw: dict | None = None) -> str:
+    base = _repair_feedback_base(code)
+    hint = _repair_hint(code, detail, raw)
+    return f"{base} {hint}".strip() if hint else base
 
 
 def _generation_error_code(exc: Exception) -> str:
@@ -777,7 +831,7 @@ async def answer_question(
                 last_answer.contexts = [item.content for item in ranked]
                 return finish(last_answer)
             trace["repair_reason"] = code
-            phase, feedback = "repair", _repair_feedback(code, last_answer.detail)
+            phase, feedback = "repair", _repair_feedback(code, last_answer.detail, raw=raw)
         if last_answer is not None:
             last_answer.contexts = [item.content for item in ranked]
             return finish(last_answer)

@@ -12,6 +12,7 @@ TEST/**
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+!frontend/.env.production
 
 # 本地文档与验收材料不进入仓库
 MD/
