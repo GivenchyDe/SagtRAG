@@ -13,6 +13,10 @@ SagtRAG 是一个面向企业知识库的 RAG 系统：管理员在后台维护�
 - **企业微信问答**：回调完成签名校验、解密、员工身份校验后快速 ACK，由 Worker 异步处理。
 - **语音问答**：下载企微语音素材，在内存中转码并调用 ASR，再复用同一套权限检索与生成流程。
 - **引用与诊断**：回答必须引用本次召回的文档分块，服务端校验引用；后台可查看召回、重排、耗时和错误诊断。
+- **有限会话**：按租户/员工/会话保存主题、待补字段和有效期，支持“请假流程 → 病假 → 需要什么材料”、更正和换话题；不缓存历史 AI 回答作为事实。
+- **有界并发与公平调度**：每个 Worker 可配置并发额度；同一员工由数据库领取/租约保证顺序，不同员工可并行；慢任务不会无限创建协程。
+- **进度与未知送达**：超过阈值最多发送一次“处理中”提示，进度不是最终答案；最终发送 unknown 不自动重发，管理员可核对后人工恢复。
+- **结构化摄取**：DOCX 按正文/表格原始顺序解析，保留标题、表头和章节路径；结构化切块尽量不拆条件/例外，并提供解析预览。
 - **操作日志**：登录、账号、员工、文档、问答详情查看等操作独立审计，支持搜索、分类和分页。
 - **软删除**：文档、员工、管理员删除后保留历史记录与审计，可重新创建同名账号或重新上传同一文件。
 
@@ -48,8 +52,8 @@ API 负责鉴权、文档上传、管理端读写和企微回调；Worker 负责
 SagtRAG/
 ├─ backend/
 │  ├─ app/                 # FastAPI、模型、检索、RAG、语音、Worker
-│  ├─ alembic/             # 数据库迁移（当前 head：0009_qa_diagnostics）
-│  ├─ scripts/             # 初始化、验收与评测脚本
+│  ├─ alembic/             # 数据库迁移（当前 head：0015_progress_feedback）
+│  ├─ scripts/             # 初始化、验收、重排校准等脚本
 │  ├─ sql/                 # 运行时角色授权 SQL
 │  ├─ tests/               # pytest
 │  ├─ .env.example         # 后端配置模板
@@ -57,14 +61,19 @@ SagtRAG/
 ├─ frontend/
 │  ├─ public/              # favicon（logo.svg / logo-transparent.png）
 │  ├─ src/                 # Vue 页面、组件、API 客户端、样式
+│  ├─ .env.production      # 生产构建 API 基址（默认同源）
 │  ├─ package.json / package-lock.json
 │  └─ vite.config.ts
 ├─ deploy/
-│  └─ requirements.lock.txt
+│  ├─ Dockerfile.api
+│  ├─ requirements.lock.txt
+│  ├─ apply_model_config.sh
+│  └─ nginx-sagtrag.conf
 ├─ TEST/
 │  ├─ init/                # PostgreSQL 初始化 SQL（pgvector）
 │  ├─ .env.example         # 本地基础设施配置模板
 │  └─ seaweedfs-s3.json.example
+├─ compose.production.yml
 └─ docker-compose.yml
 ```
 
@@ -120,6 +129,19 @@ Copy-Item backend/.env.example backend/.env
 | `WE_COM_TOKEN` / `WE_COM_ENCODING_AES_KEY` | 回调签名 Token 与 43 位 Base64 AES Key |
 | `WE_COM_TENANT_ID` | 本租户 UUID，必须与数据库中的租户一致 |
 | `ADMIN_BOOTSTRAP_PASSWORD` | 可覆盖 `TEST/.env` 中的初始管理员密码 |
+| `EMBEDDING_MODEL` | 查询/摄取共用的向量模型；切换时必须先重建或删除旧索引 |
+| `RERANK_ROLLOUT_MODE` | `legacy` / `shadow` / `target`；target 需要已校准阈值 |
+| `RAG_WORKER_CONCURRENCY` | 每个 Worker 进程的问答并发上限，默认 4 |
+| `INGESTION_WORKER_MODE` | `combined` / `rag` / `ingestion`，用于拆分摄取与问答资源 |
+| `INGESTION_THREADS` | 摄取解析/分块线程上限，默认 1 |
+| `RAG_PROGRESS_AFTER_SECONDS` | 处理超过该秒数后最多发一次进度提示，默认 8 |
+| `RAG_PROCESSING_DEADLINE_SECONDS` | 单次处理尝试总期限，默认 240 秒 |
+
+模型切换边界：
+
+- `RERANK_ROLLOUT_MODE=target` 还必须设置 `RERANK_TARGET_THRESHOLD_CALIBRATED=true`，否则代码会回退 legacy。
+- 切换 `EMBEDDING_MODEL` 后，旧模型生成的文档索引不会被新查询命中；必须先删除旧文档重传，或完成新索引重建/切换。
+- 重排模型切换不需要重建文档向量。
 
 ### 3. `TEST/seaweedfs-s3.json`
 
@@ -185,7 +207,17 @@ cd backend
 uv run --locked python -m app.worker
 ```
 
-Worker 同时消费文档摄取与企微问答任务，并定期扫描数据库恢复未完成任务。**不启动 Worker 时，上传的文档不会完成入库，企微问题也不会被回答。**
+Worker 同时承担文档摄取与企微问答；`INGESTION_WORKER_MODE=combined` 时同进程运行，`rag` 只跑问答，`ingestion` 只跑摄取。**不启动 Worker 时，上传的文档不会完成入库，企微问题也不会被回答。**
+
+生产建议把解析/分块从问答事件循环中拆出，或至少设置：
+
+```env
+RAG_WORKER_CONCURRENCY=4
+INGESTION_WORKER_MODE=combined
+INGESTION_THREADS=1
+```
+
+多 Worker 总并发量按 **进程数 × `RAG_WORKER_CONCURRENCY`** 计算；同一员工仍由数据库领取/租约保证顺序。
 
 ### 6. 启动管理后台
 
@@ -222,12 +254,17 @@ npm run dev
 - 员工访问条件在数据库查询中统一执行，文档、分块和租户均受 RLS 约束。
 - 操作日志独立保存，删除员工或管理员后仍保留审计记录。
 - 问答正文与诊断默认保留 7 天，过期后由 Worker 清理；发送结果未知的记录不会自动重发，需要人工核对。
+- 超过等待阈值最多发送一次进度提示；进度与最终答案分开存储，进度不代表最终送达。
+- 最终发送 `unknown` 时，管理员可在问答详情核对企微会话后使用“人工确认后重新排队”恢复，不会自动重复发送。
 - 不要把 `TEST/.env`、`backend/.env`、`TEST/seaweedfs-s3.json` 或任何真实密钥提交到仓库；如果曾提交过，请立即轮换。
 
 ## 部署提示
 
-- `deploy/requirements.lock.txt` 可用于固定后端部署依赖。
-- API 与 Worker 需要作为两个长期进程运行；生产环境建议由进程管理器或容器编排托管。
+- 生产使用 `compose.production.yml`，API 与 Worker 共用一个镜像；构建后要更新镜像标签并 `--force-recreate`，不能只 `up -d` 旧镜像。
+- 迁移必须使用 schema owner 连接；先备份数据库和对象存储，再执行 `alembic upgrade head`（当前 head `0015_progress_feedback`）。
+- `deploy/apply_model_config.sh shadow|target` 只切换重排/意图配置，不会切换 `EMBEDDING_MODEL`；向量模型切换必须单独处理旧文档。
+- 目标 rerank 是 `qwen3.7-text-rerank`，但当前默认仍是 `legacy`；target 阈值必须有真实对照并显式设置 `RERANK_TARGET_THRESHOLD_CALIBRATED=true`。
+- 目标 embedding 是 `qwen3.7-text-embedding-flash`；切换后旧模型文档索引不可命中，必须删除重传或重建索引。
 - 对外只暴露反向代理的 HTTPS，PostgreSQL、RabbitMQ、Redis、S3 保持内网访问。
 - 迁移使用 owner 连接，运行时使用最小权限账号；备份数据库与对象存储，并监控 Worker 积压与发送失败。
 
